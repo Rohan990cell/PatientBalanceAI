@@ -1,0 +1,269 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  /* ==========================================================================
+     PatientBalanceAI Light Medical & Calm Healthcare Design System
+     ========================================================================== */
+
+  /* Backgrounds */
+  --bg-app: #F8FAF9;               /* Ultra-soft pale neutral background */
+  --bg-surface: #FFFFFF;           /* Crisp clean white cards */
+  --bg-subtle-mint: #F0FDF4;       /* Very light mint/green section background */
+  --bg-subtle-teal: #F0FDFA;       /* Very pale teal background */
+  --bg-sidebar: #FFFFFF;           /* Clean white sidebar */
+  --bg-hover: #F1F5F9;             /* Soft neutral hover */
+
+  /* Primary Brand & Accents: Soft Medical Teal & Calm Green */
+  --teal-primary: #0D9488;         /* Soft medical teal */
+  --teal-primary-hover: #0F766E;   /* Deep accessible teal */
+  --teal-light: #CCFBF1;           /* Very light teal badge / highlight */
+  --teal-surface: #F0FDFA;
+
+  --green-primary: #059669;        /* Calm healthcare green */
+  --green-light: #DCFCE7;          /* Soft green badge background */
+  --green-subtle: #E8F7EE;
+
+  --amber-soft: #D97706;
+  --amber-light: #FEF3C7;
+
+  --rose-soft: #E11D48;
+  --rose-light: #FFE4E6;
+
+  --purple-doctor: #7C3AED;        /* Clean clinician purple for Doctor mode */
+  --purple-light: #F3E8FF;
+
+  /* High Readability Charcoal & Slate Text Colors */
+  --text-main: #0F172A;            /* Dark charcoal - primary text */
+  --text-secondary: #334155;       /* Charcoal slate - body text */
+  --text-muted: #64748B;           /* Soft slate - subtitles & hints */
+  --text-light: #94A3B8;           /* Subtle labels */
+
+  /* Crisp Minimal Borders */
+  --border-light: #E2E8F0;         /* Soft gray border */
+  --border-mint: #D1FAE5;          /* Delicate mint border */
+  --border-teal: #99F6E4;          /* Soft teal border */
+
+  /* Minimal Healthcare Shadows */
+  --shadow-card: 0 2px 6px -1px rgba(15, 23, 42, 0.04), 0 1px 3px -1px rgba(15, 23, 42, 0.03);
+  --shadow-card-hover: 0 6px 16px -2px rgba(15, 23, 42, 0.06), 0 2px 4px -2px rgba(15, 23, 42, 0.03);
+  --shadow-button: 0 2px 4px rgba(13, 148, 136, 0.16);
+
+  /* Typography */
+  --font-sans: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  /* Transitions */
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-smooth: 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Global Reset */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--bg-app);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Typography Hierarchy */
+h1, h2, h3, h4, h5, h6 {
+  color: var(--text-main);
+  letter-spacing: -0.015em;
+  font-weight: 700;
+}
+
+p, span, label {
+  color: var(--text-secondary);
+}
+
+/* Clean Medical Card Surface */
+.medical-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-light);
+  border-radius: 16px;
+  box-shadow: var(--shadow-card);
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast), border-color var(--transition-fast);
+}
+
+.medical-card:hover {
+  border-color: #CBD5E1;
+  box-shadow: var(--shadow-card-hover);
+}
+
+.medical-card-mint {
+  background: var(--bg-subtle-mint);
+  border: 1px solid var(--border-mint);
+  border-radius: 16px;
+  box-shadow: var(--shadow-card);
+}
+
+/* Buttons - Friendly, approachable & high-contrast */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--teal-primary);
+  color: #FFFFFF;
+  border: none;
+  border-radius: 12px;
+  padding: 10px 20px;
+  font-family: var(--font-sans);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast), transform var(--transition-fast), box-shadow var(--transition-fast);
+  box-shadow: var(--shadow-button);
+}
+
+.btn-primary:hover {
+  background: var(--teal-primary-hover);
+  transform: translateY(-1px);
+}
+
+.btn-primary:active {
+  transform: translateY(0);
+}
+
+.btn-large {
+  padding: 14px 28px;
+  font-size: 1.0625rem;
+  border-radius: 14px;
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #FFFFFF;
+  color: var(--text-main);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  padding: 10px 18px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.btn-secondary:hover {
+  background: var(--bg-hover);
+  border-color: #CBD5E1;
+}
+
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.btn-ghost:hover {
+  background: #F1F5F9;
+  color: var(--text-main);
+}
+
+/* Clean, soft status badges (No neon) */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.status-pill.connected, .status-pill.ready {
+  background: var(--green-light);
+  color: #166534;
+  border: 1px solid #BBF7D0;
+}
+
+.status-pill.disconnected {
+  background: #F1F5F9;
+  color: #64748B;
+  border: 1px solid #E2E8F0;
+}
+
+.status-pill.warning, .status-pill.standby {
+  background: var(--amber-light);
+  color: #92400E;
+  border: 1px solid #FDE68A;
+}
+
+.status-pill.info {
+  background: var(--teal-light);
+  color: #115E59;
+  border: 1px solid var(--border-teal);
+}
+
+/* Subtle non-glowing dot */
+.dot-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: currentColor;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
+
+/* ==========================================================================
+   Phase 3 Real-Time Balance Graphs Responsive 3-Column Grid
+   ========================================================================== */
+.balance-graphs-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  align-items: stretch;
+}
+
+@media (max-width: 1024px) {
+  .balance-graphs-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .balance-graphs-grid {
+    grid-template-columns: 1fr;
+  }
+}
+

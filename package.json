@@ -1,0 +1,48 @@
+{
+  "name": "patient-balance-ai",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test:smpl": "tsx scripts/test_smpl_integration.mjs",
+    "test:exercise": "tsx scripts/test_exercise_engine.mjs",
+    "test:pose": "tsx scripts/verify_pose_angles.mjs",
+    "test:multimodal": "tsx scripts/test_multimodal_integration.mjs",
+    "test:cop": "tsx src/utils/copMapping.test.ts",
+    "test:timeseries": "tsx src/utils/timeSeries.test.ts",
+    "test:session": "tsx src/utils/sessionRecording.test.ts",
+    "test:pdf": "tsx src/utils/pdfReport.test.ts",
+    "test:multimodal-exercise": "tsx src/utils/multimodalExercise.test.ts",
+    "test:cop-target": "tsx src/utils/copTargetExercise.test.ts",
+    "test:posture-balance": "tsx src/utils/postureBalanceExercise.test.ts",
+    "test:posture-alignment": "tsx src/utils/postureAlignmentExercise.test.ts",
+    "test": "tsx scripts/test_smpl_integration.mjs && tsx scripts/test_exercise_engine.mjs && tsx scripts/verify_pose_angles.mjs && tsx scripts/test_multimodal_integration.mjs && tsx src/utils/copMapping.test.ts && tsx src/utils/timeSeries.test.ts && tsx src/utils/sessionRecording.test.ts && tsx src/utils/pdfReport.test.ts && tsx src/utils/multimodalExercise.test.ts && tsx src/utils/copTargetExercise.test.ts && tsx src/utils/postureBalanceExercise.test.ts && tsx src/utils/postureAlignmentExercise.test.ts"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "^1.0.1",
+    "@react-three/drei": "^10.7.9",
+    "@react-three/fiber": "^9.8.1",
+    "@tauri-apps/api": "^2.1.1",
+    "@types/three": "^0.186.0",
+    "clsx": "^2.1.1",
+    "jspdf": "^4.2.1",
+    "lucide-react": "^1.16.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.4",
+    "@types/node": "^26.6.3",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tsx": "^4.23.15",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  }
+}
