@@ -2,11 +2,11 @@ import React from "react";
 import { Bluetooth, Play, Clock, ChevronRight } from "lucide-react";
 import { StatusBadge } from "../components/common/StatusBadge";
 import { PatientProfile } from "../types/patient";
+import { useBalanceBoard } from "../context/HardwareContext";
 
 interface HomePageProps {
   patient: PatientProfile;
   boardConnected: boolean;
-  liveWeight?: number;
   onStartSession: () => void;
   onNavigateToExercises: () => void;
   onNavigateToSettings: () => void;
@@ -17,13 +17,15 @@ interface HomePageProps {
 export const HomePage: React.FC<HomePageProps> = ({
   patient,
   boardConnected,
-  liveWeight,
   onStartSession,
   onNavigateToExercises,
   onNavigateToSettings,
   onNavigateToDevices,
   onNavigateToBalance,
 }) => {
+  // Read live weight directly — isolates high-frequency re-renders to this component only
+  const { reading } = useBalanceBoard();
+  const liveWeight = reading?.totalWeight;
   // Friendly greeting based on hour of day
   const getGreeting = () => {
     const hour = new Date().getHours();
@@ -165,6 +167,9 @@ export const HomePage: React.FC<HomePageProps> = ({
               color: boardConnected && liveWeight && liveWeight > 1.0 ? "var(--teal-primary)" : "var(--text-light)",
               margin: "6px 0 2px 0",
               fontFamily: "var(--font-sans)",
+              fontVariantNumeric: "tabular-nums",
+              minWidth: "5ch",
+              display: "inline-block",
             }}
           >
             {boardConnected && liveWeight && liveWeight > 1.0 ? liveWeight.toFixed(1) : "--"}

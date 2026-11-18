@@ -79,11 +79,11 @@ export const ProgressPage: React.FC = () => {
             >
               <div style={{ padding: "10px", background: "var(--bg-app)", borderRadius: "8px" }}>
                 <span style={{ color: "var(--text-muted)" }}>CoP X (Lateral): </span>
-                <strong style={{ color: "var(--text-main)" }}>0.0 mm</strong>
+                <strong style={{ color: "var(--text-main)" }}>--</strong>
               </div>
               <div style={{ padding: "10px", background: "var(--bg-app)", borderRadius: "8px" }}>
                 <span style={{ color: "var(--text-muted)" }}>CoP Y (A-P): </span>
-                <strong style={{ color: "var(--text-main)" }}>0.0 mm</strong>
+                <strong style={{ color: "var(--text-main)" }}>--</strong>
               </div>
             </div>
           </div>

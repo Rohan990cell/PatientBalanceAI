@@ -9,7 +9,9 @@ export type ExerciseId =
   | "side-to-side-balance"
   | "weight-shift-cop-target"
   | "posture-balance-multimodal"
-  | "posture-alignment";
+  | "posture-alignment"
+  | "directional-weight-shift"
+  | "multimodal-leg-raise-balance";
 
 export type ExerciseDifficulty = "Easy" | "Medium" | "Challenging";
 

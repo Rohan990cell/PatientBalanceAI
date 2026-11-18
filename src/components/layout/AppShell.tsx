@@ -10,6 +10,7 @@ interface AppShellProps {
   onToggleMode: (mode: ApplicationMode) => void;
   boardConnected: boolean;
   webcamActive: boolean;
+  hideSidebar?: boolean;
   children: React.ReactNode;
 }
 
@@ -20,6 +21,7 @@ export const AppShell: React.FC<AppShellProps> = ({
   onToggleMode,
   boardConnected,
   webcamActive,
+  hideSidebar = false,
   children,
 }) => {
   return (
@@ -32,13 +34,15 @@ export const AppShell: React.FC<AppShellProps> = ({
         backgroundColor: "var(--bg-app)",
       }}
     >
-      {/* Primary Sidebar Rail */}
-      <Sidebar
-        currentTab={currentTab}
-        onSelectTab={onSelectTab}
-        mode={mode}
-        onToggleMode={onToggleMode}
-      />
+      {/* Primary Sidebar Rail (Omitted when hideSidebar is true) */}
+      {!hideSidebar && (
+        <Sidebar
+          currentTab={currentTab}
+          onSelectTab={onSelectTab}
+          mode={mode}
+          onToggleMode={onToggleMode}
+        />
+      )}
 
       {/* Main App Workspace */}
       <div
@@ -50,19 +54,21 @@ export const AppShell: React.FC<AppShellProps> = ({
           overflow: "hidden",
         }}
       >
-        <Header
-          currentTab={currentTab}
-          mode={mode}
-          boardConnected={boardConnected}
-          webcamActive={webcamActive}
-          onNavigateToDevices={() => onSelectTab(mode === "doctor" ? "doctor-devices" : "devices")}
-        />
+        {!hideSidebar && (
+          <Header
+            currentTab={currentTab}
+            mode={mode}
+            boardConnected={boardConnected}
+            webcamActive={webcamActive}
+            onNavigateToDevices={() => onSelectTab(mode === "doctor" ? "doctor-devices" : "devices")}
+          />
+        )}
 
         <main
           style={{
             flex: 1,
             overflowY: "auto",
-            padding: "24px 28px",
+            padding: hideSidebar ? "0" : "24px 28px",
           }}
         >
           {children}

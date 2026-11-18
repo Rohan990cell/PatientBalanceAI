@@ -13,17 +13,23 @@ import {
   ShieldCheck,
   Eye,
   Check,
+  Save,
+  Sliders,
 } from "lucide-react";
 import { useVision } from "../../context/VisionContext";
 import {
   SKELETON_2D_KEY_JOINTS,
-  SKELETON_2D_BONES,
   analyzePostureAlignment,
   calculatePostureAlignmentSummary,
   PostureAlignmentAnalysis,
   PostureAlignmentSummary,
+  PostureLandmarkSmoother,
+  PostureSessionTracker,
+  PostureTrackerState,
   POSTURE_CLINICAL_DISCLOSURE,
+  DEFAULT_POSTURE_TOLERANCES,
 } from "../../utils/postureAlignmentExercise";
+import { SessionStorageService } from "../../services/sessionStorage";
 import { PatientProfile } from "../../types/patient";
 
 interface PostureAlignmentExerciseProps {
@@ -39,6 +45,7 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
 }) => {
   const {
     visionState,
+    getLatestVisionState,
     isCameraActive,
     startCamera,
     getMediaStream,
@@ -59,23 +66,72 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number | null>(null);
 
+  // Landmark Smoother (EMA) & Session Tracker (Grace Period & Hysteresis)
+  const smootherRef = useRef(new PostureLandmarkSmoother(0.30));
+  const trackerRef = useRef(new PostureSessionTracker());
+
+  const [trackerState, setTrackerState] = useState<PostureTrackerState>(() =>
+    trackerRef.current.getState()
+  );
+  const [currentAnalysis, setCurrentAnalysis] = useState<PostureAlignmentAnalysis>(() =>
+    analyzePostureAlignment(null)
+  );
+
+  // Synchronized refs to avoid re-triggering interval or animation loops on every frame
+  const visionStateRef = useRef(visionState);
+  useEffect(() => {
+    visionStateRef.current = visionState;
+  }, [visionState]);
+
+  const currentAnalysisRef = useRef(currentAnalysis);
+  useEffect(() => {
+    currentAnalysisRef.current = currentAnalysis;
+  }, [currentAnalysis]);
+
+  const trackerStateRef = useRef(trackerState);
+  useEffect(() => {
+    trackerStateRef.current = trackerState;
+  }, [trackerState]);
+
   // Metrics Sample Counters for Session Summary
   const sessionStartTimeRef = useRef<number | null>(null);
-  const lastSampleTimeRef = useRef<number | null>(null);
-  const timerIntervalRef = useRef<any>(null);
-  const totalSamplesCountRef = useRef<number>(0);
-  const trackedSamplesCountRef = useRef<number>(0);
-  const goodPostureSamplesCountRef = useRef<number>(0);
+  const lastAnimTimeRef = useRef<number>(Date.now());
+  const lastStateUpdateTimeRef = useRef<number>(0);
+  const lastMidShoulderRef = useRef<{ x: number; y: number } | null>(null);
+  const latestRenderStatsRef = useRef<{ renderedConnections: number; validCount: number }>({
+    renderedConnections: 0,
+    validCount: 0,
+  });
+  const latestIsStillRef = useRef<boolean>(true);
+  const lastVidDimRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
+
+  // Video & Viewport Dimensions
+  const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number }>({
+    width: 640,
+    height: 480,
+  });
+
+  // Internal developer logging throttle ref
+  const lastDevLogTimeRef = useRef<number>(0);
 
   const [sessionSummary, setSessionSummary] = useState<PostureAlignmentSummary | null>(null);
 
-  // Real-time Posture Analysis from MediaPipe 2D Pose landmarks
-  const analysis: PostureAlignmentAnalysis = useMemo(() => {
-    if (!visionState.hasPose || !visionState.pose?.allRawLandmarks) {
-      return analyzePostureAlignment(null);
-    }
-    return analyzePostureAlignment(visionState.pose.allRawLandmarks);
-  }, [visionState.hasPose, visionState.pose]);
+  // Neutral Posture Calibration State (normalizes monocular camera elevation and user height)
+  const calibratedBaselineRef = useRef<{
+    pitch: number;
+    shoulderTilt: number;
+    offset: number;
+  } | null>(null);
+  const countdownSamplesRef = useRef<{
+    pitch: number;
+    shoulderTilt: number;
+    offset: number;
+  }[]>([]);
+  const [isCalibrated, setIsCalibrated] = useState<boolean>(false);
+
+  // Session Storage State
+  const [isSessionSaved, setIsSessionSaved] = useState<boolean>(false);
+  const [isSavingSession, setIsSavingSession] = useState<boolean>(false);
 
   // Preferred Camera Device Label (Intel RealSense prioritized when available)
   const cameraDeviceName = useMemo(() => {
@@ -105,14 +161,163 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
         console.warn("[PostureAlignmentExercise] videoElement.play() warning:", err);
       });
     }
-  }, [phase, isCameraActive, getMediaStream]);
+  }, [phase, isCameraActive, getMediaStream, visionState.selectedCameraId, visionState.activeCameraLabel]);
+
+  // Helper to compute landmark tracking confidence percentage [0 - 100]
+  const computeTrackingConfidence = (landmarks: any[] | null | undefined): number => {
+    if (!landmarks || landmarks.length === 0) return 0;
+    let sum = 0;
+    for (let i = 0; i < landmarks.length; i++) {
+      sum += (landmarks[i]?.visibility !== undefined ? landmarks[i].visibility : 1.0);
+    }
+    return Math.round((sum / landmarks.length) * 100);
+  };
+
+  // Upper-body posture connections matching Reference Image 3:
+  // Shoulders, Left Arm (Shoulder -> Elbow -> Wrist), Right Arm (Shoulder -> Elbow -> Wrist)
+  const UPPER_BODY_POSTURE_BONES: [number, number][] = [
+    [11, 12], // Left shoulder to right shoulder
+    [11, 13], // Left shoulder to left elbow
+    [13, 15], // Left elbow to left wrist
+    [12, 14], // Right shoulder to right elbow
+    [14, 16], // Right elbow to right wrist
+  ];
+
+  // Specific posture landmarks for joint markers: Shoulders, Elbows, and Wrists ONLY
+  const UPPER_BODY_POSTURE_JOINTS = [11, 12, 13, 14, 15, 16];
+
+  // Helper to draw clean orange upper-body posture skeleton matching reference design
+  const drawSkeleton2D = (
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    landmarks: any[],
+    _isUpright: boolean = true,
+    _isCountdown: boolean = false
+  ): { renderedConnections: number; validCount: number } => {
+    let renderedConnections = 0;
+    let validCount = 0;
+
+    // Landmark validity check: considers landmark valid when visibility >= 0.25
+    const isLandmarkValid = (p?: any) =>
+      Boolean(
+        p &&
+        Number.isFinite(p.x) &&
+        Number.isFinite(p.y) &&
+        (p.visibility === undefined ? 1.0 : p.visibility) >= 0.25
+      );
+
+    // Count valid upper body landmarks
+    for (const idx of UPPER_BODY_POSTURE_JOINTS) {
+      if (isLandmarkValid(landmarks[idx])) {
+        validCount++;
+      }
+    }
+
+    const ls = landmarks[11];
+    const rs = landmarks[12];
+    const nose = landmarks[0];
+
+    // 1. Optional Torso Center Reference Line (Dashed white vertical line through mid-shoulder)
+    if (isLandmarkValid(ls) && isLandmarkValid(rs)) {
+      const midShoulderX = ((ls.x + rs.x) / 2) * w;
+      const midShoulderY = ((ls.y + rs.y) / 2) * h;
+      const shoulderSpan = Math.hypot((rs.x - ls.x) * w, (rs.y - ls.y) * h);
+
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+      ctx.lineWidth = 1.5;
+
+      const topY = isLandmarkValid(nose)
+        ? Math.min(nose.y * h, midShoulderY - shoulderSpan * 0.45)
+        : midShoulderY - shoulderSpan * 0.45;
+      const bottomY = midShoulderY + shoulderSpan * 0.55;
+
+      ctx.beginPath();
+      ctx.moveTo(midShoulderX, topY);
+      ctx.lineTo(midShoulderX, bottomY);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 2. Draw Clean Orange Upper-Body Bone Lines (matching Reference Image 3)
+    ctx.save();
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#F59E0B"; // Warm vibrant orange matching reference screenshot
+
+    for (const [fromIdx, toIdx] of UPPER_BODY_POSTURE_BONES) {
+      const p1 = landmarks[fromIdx];
+      const p2 = landmarks[toIdx];
+      if (isLandmarkValid(p1) && isLandmarkValid(p2)) {
+        ctx.beginPath();
+        ctx.moveTo(p1.x * w, p1.y * h);
+        ctx.lineTo(p2.x * w, p2.y * h);
+        ctx.stroke();
+        renderedConnections++;
+      }
+    }
+    ctx.restore();
+
+    // 3. Draw Small White-Centred Orange Joint Markers for Shoulders, Elbows, Wrists ONLY
+    for (const idx of UPPER_BODY_POSTURE_JOINTS) {
+      const joint = landmarks[idx];
+      if (isLandmarkValid(joint)) {
+        const jx = joint.x * w;
+        const jy = joint.y * h;
+
+        // Outer orange circle
+        ctx.beginPath();
+        ctx.arc(jx, jy, 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = "#F59E0B";
+        ctx.fill();
+
+        // Crisp white inner center
+        ctx.beginPath();
+        ctx.arc(jx, jy, 2, 0, Math.PI * 2);
+        ctx.fillStyle = "#FFFFFF";
+        ctx.fill();
+      }
+    }
+
+    return { renderedConnections, validCount };
+  };
+
+  // Complete exercise and generate summary
+  const completeExercise = useCallback(
+    (finalTrackerState: PostureTrackerState) => {
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+      }
+
+      const summary = calculatePostureAlignmentSummary({
+        totalDurationSeconds: Math.max(
+          finalTrackerState.totalDurationSeconds,
+          finalTrackerState.timeInCorrectPostureSeconds
+        ),
+        totalSamples: finalTrackerState.totalSamplesCount,
+        trackedSamples: finalTrackerState.trackedSamplesCount,
+        goodPostureSamples: finalTrackerState.goodSamplesCount,
+        timeInCorrectPostureSeconds: finalTrackerState.timeInCorrectPostureSeconds,
+        requiredStabilitySeconds: REQUIRED_STABILITY_SECONDS,
+      });
+
+      setSessionSummary(summary);
+      setPhase("COMPLETED");
+    },
+    [REQUIRED_STABILITY_SECONDS]
+  );
 
   // =========================================================================
-  // 2D MEDIAPIPE SKELETON CANVAS OVERLAY RENDER LOOP
-  // Shows at minimum: Head, Shoulders, Elbows, Wrists, Hips, Knees, Ankles
+  // UNIFIED 60Hz ANIMATION & POSTURE VALIDATION LOOP
+  // Microsecond synchronization: Canvas rendering, EMA landmark smoothing,
+  // biomechanical posture validation, and hold stability timing run on the EXACT same frame.
   // =========================================================================
   useEffect(() => {
-    if (phase !== "ACTIVE" && phase !== "COUNTDOWN") {
+    if (phase !== "ACTIVE" && phase !== "COUNTDOWN" && !(phase === "INTRO" && isCameraActive)) {
       if (animFrameRef.current) {
         cancelAnimationFrame(animFrameRef.current);
         animFrameRef.current = null;
@@ -127,210 +332,232 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const render2DSkeleton = () => {
-      // Sync canvas dimensions with video stream
+    if (phase === "ACTIVE" && !sessionStartTimeRef.current) {
+      sessionStartTimeRef.current = Date.now();
+    }
+    lastAnimTimeRef.current = performance.now();
+    lastStateUpdateTimeRef.current = performance.now();
+    let lastCountdownSampleTime = 0;
+
+    const unifiedLoop = () => {
+      const now = performance.now();
+      const dt = Math.max(8, Math.min(100, now - (lastAnimTimeRef.current || now)));
+      lastAnimTimeRef.current = now;
+
+      // 1. Sync canvas dimensions with video stream
       if (video.videoWidth > 0 && video.videoHeight > 0) {
         if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
         }
+        if (lastVidDimRef.current.w !== video.videoWidth || lastVidDimRef.current.h !== video.videoHeight) {
+          lastVidDimRef.current = { w: video.videoWidth, h: video.videoHeight };
+          setVideoDimensions({ width: video.videoWidth, height: video.videoHeight });
+        }
       }
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      const landmarks = visionState.pose?.allRawLandmarks;
-      if (landmarks && landmarks.length >= 29 && visionState.hasPose) {
-        const w = canvas.width;
-        const h = canvas.height;
+      // 2. Fetch latest synchronous vision state
+      const curVision = getLatestVisionState ? getLatestVisionState() : visionStateRef.current;
+      const rawLandmarks = curVision.hasPose ? curVision.pose?.allRawLandmarks : null;
+      const hasValidPose = Boolean(rawLandmarks && rawLandmarks.length >= 25 && curVision.hasPose);
 
-        // Color coding:
-        // Vibrant Emerald Green if Good Posture
-        // Warning Amber if Leaning Left/Right/Forward/Backward
-        // Teal if neutral tracking
-        let strokeColor = "rgba(13, 148, 136, 0.90)"; // teal
-        let jointColor = "#0D9488";
+      if (phase === "INTRO") {
+        if (hasValidPose && rawLandmarks) {
+          const smoothed = smootherRef.current.update(rawLandmarks) || rawLandmarks;
+          const renderStats = drawSkeleton2D(ctx, canvas.width, canvas.height, smoothed, true, false);
+          latestRenderStatsRef.current = renderStats;
+          latestIsStillRef.current = true;
 
-        if (analysis.isUpright) {
-          strokeColor = "rgba(16, 185, 129, 0.95)"; // green
-          jointColor = "#10B981";
-        } else if (
-          analysis.postureState === "LEAN_LEFT" ||
-          analysis.postureState === "LEAN_RIGHT" ||
-          analysis.postureState === "LEAN_FORWARD" ||
-          analysis.postureState === "LEAN_BACKWARD"
-        ) {
-          strokeColor = "rgba(245, 158, 11, 0.95)"; // amber
-          jointColor = "#F59E0B";
-        }
-
-        // 1. Draw Kinematic 2D Bone Lines
-        ctx.lineWidth = 4;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        ctx.strokeStyle = strokeColor;
-
-        for (const [fromIdx, toIdx] of SKELETON_2D_BONES) {
-          const p1 = landmarks[fromIdx];
-          const p2 = landmarks[toIdx];
-          if (p1 && p2 && (p1.visibility ?? 1) > 0.4 && (p2.visibility ?? 1) > 0.4) {
-            ctx.beginPath();
-            ctx.moveTo(p1.x * w, p1.y * h);
-            ctx.lineTo(p2.x * w, p2.y * h);
-            ctx.stroke();
+          if (now - lastStateUpdateTimeRef.current >= 60) {
+            lastStateUpdateTimeRef.current = now;
           }
         }
+        animFrameRef.current = requestAnimationFrame(unifiedLoop);
+        return;
+      }
 
-        // 2. Draw Spine Midline Connection (Nose -> Mid-Shoulder -> Mid-Hip)
-        const nose = landmarks[SKELETON_2D_KEY_JOINTS.NOSE];
-        const ls = landmarks[SKELETON_2D_KEY_JOINTS.LEFT_SHOULDER];
-        const rs = landmarks[SKELETON_2D_KEY_JOINTS.RIGHT_SHOULDER];
-        const lh = landmarks[SKELETON_2D_KEY_JOINTS.LEFT_HIP];
-        const rh = landmarks[SKELETON_2D_KEY_JOINTS.RIGHT_HIP];
+      if (phase === "COUNTDOWN") {
+        if (hasValidPose && rawLandmarks) {
+          const smoothed = smootherRef.current.update(rawLandmarks);
+          const renderStats = drawSkeleton2D(ctx, canvas.width, canvas.height, smoothed || rawLandmarks, false, true);
+          latestRenderStatsRef.current = renderStats;
+          latestIsStillRef.current = true;
 
-        if (ls && rs && lh && rh) {
-          const midShoulderX = ((ls.x + rs.x) / 2) * w;
-          const midShoulderY = ((ls.y + rs.y) / 2) * h;
-          const midHipX = ((lh.x + rh.x) / 2) * w;
-          const midHipY = ((lh.y + rh.y) / 2) * h;
+          if (now - lastCountdownSampleTime >= 80) {
+            lastCountdownSampleTime = now;
+            const ls = rawLandmarks[SKELETON_2D_KEY_JOINTS.LEFT_SHOULDER];
+            const rs = rawLandmarks[SKELETON_2D_KEY_JOINTS.RIGHT_SHOULDER];
+            const lh = rawLandmarks[SKELETON_2D_KEY_JOINTS.LEFT_HIP];
+            const rh = rawLandmarks[SKELETON_2D_KEY_JOINTS.RIGHT_HIP];
 
-          ctx.save();
-          ctx.setLineDash([6, 4]);
-          ctx.strokeStyle = analysis.isUpright
-            ? "rgba(16, 185, 129, 0.9)"
-            : "rgba(255, 255, 255, 0.85)";
-          ctx.lineWidth = 2.5;
+            if (ls && rs) {
+              const dxS = Math.abs(ls.x - rs.x);
+              const dyS = rs.y - ls.y;
+              const shoulderTilt = Math.round(Math.atan2(dyS, Math.max(0.01, dxS)) * (180 / Math.PI));
+              const midShoulderX = (ls.x + rs.x) / 2;
+              const midShoulderY = (ls.y + rs.y) / 2;
+              const midShoulderZ = ((ls.z ?? 0) + (rs.z ?? 0)) / 2;
 
-          // Head (Nose) to mid-shoulder
-          if (nose) {
-            ctx.beginPath();
-            ctx.moveTo(nose.x * w, nose.y * h);
-            ctx.lineTo(midShoulderX, midShoulderY);
-            ctx.stroke();
+              let pitch = 0;
+              let offset = 0;
+              if (lh && rh) {
+                const midHipX = (lh.x + rh.x) / 2;
+                const midHipY = (lh.y + rh.y) / 2;
+                const midHipZ = ((lh.z ?? 0) + (rh.z ?? 0)) / 2;
+                const torsoHeight = Math.max(0.10, Math.abs(midHipY - midShoulderY));
+                const torsoDz = midHipZ - midShoulderZ;
+                pitch = Math.round(Math.atan2(torsoDz, Math.max(0.01, torsoHeight)) * (180 / Math.PI));
+                offset = parseFloat(((midShoulderX - midHipX) / torsoHeight).toFixed(3));
+              } else if (lh || rh) {
+                const hip = lh || rh!;
+                const torsoHeight = Math.max(0.10, Math.abs(hip.y - midShoulderY));
+                const torsoDz = (hip.z ?? 0) - midShoulderZ;
+                pitch = Math.round(Math.atan2(torsoDz, Math.max(0.01, torsoHeight)) * (180 / Math.PI));
+              }
+              countdownSamplesRef.current.push({ pitch, shoulderTilt, offset });
+            }
           }
+        }
+        animFrameRef.current = requestAnimationFrame(unifiedLoop);
+        return;
+      }
 
-          // Spine: mid-shoulder to mid-hip
-          ctx.beginPath();
-          ctx.moveTo(midShoulderX, midShoulderY);
-          ctx.lineTo(midHipX, midHipY);
-          ctx.stroke();
-          ctx.restore();
+      // PHASE === "ACTIVE"
+      if (hasValidPose && rawLandmarks) {
+        // Continuous latest-frame landmark update with adaptive velocity smoothing
+        const smoothed = smootherRef.current.update(rawLandmarks) || rawLandmarks;
+
+        // Torso Stillness Verification: evaluate mid-shoulder displacement between frames
+        const ls = smoothed[SKELETON_2D_KEY_JOINTS.LEFT_SHOULDER];
+        const rs = smoothed[SKELETON_2D_KEY_JOINTS.RIGHT_SHOULDER];
+        let torsoSpeed = 0;
+        let isStill = true;
+
+        if (ls && rs) {
+          const curMidX = (ls.x + rs.x) / 2;
+          const curMidY = (ls.y + rs.y) / 2;
+          if (lastMidShoulderRef.current && dt > 0) {
+            const dx = curMidX - lastMidShoulderRef.current.x;
+            const dy = curMidY - lastMidShoulderRef.current.y;
+            const dist = Math.hypot(dx, dy);
+            torsoSpeed = dist / (dt / 1000);
+            isStill = torsoSpeed <= (DEFAULT_POSTURE_TOLERANCES.maxTorsoSpeed ?? 0.22);
+          }
+          lastMidShoulderRef.current = { x: curMidX, y: curMidY };
         }
 
-        // 3. Draw Key 2D Joints:
-        // Head, Shoulders, Elbows, Wrists, Hips, Knees, Ankles
-        for (const [, jointIdx] of Object.entries(SKELETON_2D_KEY_JOINTS)) {
-          const joint = landmarks[jointIdx];
-          if (joint && (joint.visibility ?? 1) > 0.35) {
-            const jx = joint.x * w;
-            const jy = joint.y * h;
+        // Fallback baseline calibration if countdown had no samples
+        if (!calibratedBaselineRef.current && ls && rs) {
+          const lh = smoothed[SKELETON_2D_KEY_JOINTS.LEFT_HIP];
+          const rh = smoothed[SKELETON_2D_KEY_JOINTS.RIGHT_HIP];
+          const dxS = Math.abs(ls.x - rs.x);
+          const dyS = rs.y - ls.y;
+          const shoulderTilt = Math.round(Math.atan2(dyS, Math.max(0.01, dxS)) * (180 / Math.PI));
+          const midShoulderX = (ls.x + rs.x) / 2;
+          const midShoulderY = (ls.y + rs.y) / 2;
+          const midShoulderZ = ((ls.z ?? 0) + (rs.z ?? 0)) / 2;
 
-            // Outer glowing ring
-            ctx.beginPath();
-            ctx.arc(jx, jy, 7, 0, Math.PI * 2);
-            ctx.fillStyle = jointColor;
-            ctx.fill();
+          let pitch = 0;
+          let offset = 0;
+          if (lh && rh) {
+            const midHipX = (lh.x + rh.x) / 2;
+            const midHipY = (lh.y + rh.y) / 2;
+            const midHipZ = ((lh.z ?? 0) + (rh.z ?? 0)) / 2;
+            const torsoHeight = Math.max(0.10, Math.abs(midHipY - midShoulderY));
+            const torsoDz = midHipZ - midShoulderZ;
+            pitch = Math.round(Math.atan2(torsoDz, Math.max(0.01, torsoHeight)) * (180 / Math.PI));
+            offset = parseFloat(((midShoulderX - midHipX) / torsoHeight).toFixed(3));
+          }
+          calibratedBaselineRef.current = { pitch, shoulderTilt, offset };
+          trackerRef.current.calibrateBaseline(pitch, shoulderTilt, offset);
+          setIsCalibrated(true);
+        }
 
-            // Inner white core
-            ctx.beginPath();
-            ctx.arc(jx, jy, 3.5, 0, Math.PI * 2);
-            ctx.fillStyle = "#FFFFFF";
-            ctx.fill();
+        const activeToleranceConfig = calibratedBaselineRef.current
+          ? {
+            neutralPitchBaselineDeg: calibratedBaselineRef.current.pitch,
+            neutralShoulderTiltBaselineDeg: calibratedBaselineRef.current.shoulderTilt,
+            neutralOffsetBaseline: calibratedBaselineRef.current.offset,
+          }
+          : undefined;
+
+        // Perform normalized posture assessment
+        const freshAnalysis = analyzePostureAlignment(
+          smoothed,
+          activeToleranceConfig,
+          curVision.pose,
+          { isStill, torsoSpeed }
+        );
+        currentAnalysisRef.current = freshAnalysis;
+
+        // Update state machine tracker (timer, grace period, hysteresis)
+        const nextTracker = trackerRef.current.update(freshAnalysis, dt);
+        trackerStateRef.current = nextTracker;
+
+        // Render skeleton on canvas in lockstep with posture evaluation
+        const renderStats = drawSkeleton2D(ctx, canvas.width, canvas.height, smoothed, freshAnalysis.isUpright, false);
+        latestRenderStatsRef.current = renderStats;
+        latestIsStillRef.current = isStill;
+
+        // Complete exercise automatically when 10.0 seconds achieved
+        if (nextTracker.isComplete) {
+          setCurrentAnalysis(freshAnalysis);
+          setTrackerState(nextTracker);
+          setTimeInCorrectPosture(nextTracker.timeInCorrectPostureSeconds);
+          completeExercise(nextTracker);
+          return;
+        }
+      } else {
+        // Missing pose or tracking lost
+        lastMidShoulderRef.current = null;
+        latestRenderStatsRef.current = { renderedConnections: 0, validCount: 0 };
+        latestIsStillRef.current = false;
+        const freshAnalysis = analyzePostureAlignment(null);
+        currentAnalysisRef.current = freshAnalysis;
+
+        const nextTracker = trackerRef.current.update(freshAnalysis, dt);
+        trackerStateRef.current = nextTracker;
+      }
+
+      // Throttle React state re-renders to every ~50ms (20Hz)
+      if (now - lastStateUpdateTimeRef.current >= 50) {
+        lastStateUpdateTimeRef.current = now;
+        setElapsedTotalMs((prev) => prev + dt);
+        setCurrentAnalysis(currentAnalysisRef.current);
+        setTrackerState(trackerStateRef.current);
+        setTimeInCorrectPosture(trackerStateRef.current.timeInCorrectPostureSeconds);
+
+        // Internal developer console diagnostic logging (throttled ~3s, not displayed in UI)
+        if (now - lastDevLogTimeRef.current >= 3000) {
+          lastDevLogTimeRef.current = now;
+          if (process.env.NODE_ENV !== "production") {
+            console.debug("[PostureAlignment] Pose tracking status:", {
+              phase,
+              validJoints: latestRenderStatsRef.current.validCount,
+              confidence: computeTrackingConfidence(rawLandmarks),
+              isStill: latestIsStillRef.current,
+              isUpright: currentAnalysisRef.current.isUpright,
+            });
           }
         }
       }
 
-      animFrameRef.current = requestAnimationFrame(render2DSkeleton);
+      animFrameRef.current = requestAnimationFrame(unifiedLoop);
     };
 
-    animFrameRef.current = requestAnimationFrame(render2DSkeleton);
+    animFrameRef.current = requestAnimationFrame(unifiedLoop);
 
     return () => {
       if (animFrameRef.current) {
         cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
       }
     };
-  }, [phase, visionState.pose, visionState.hasPose, analysis.isUpright, analysis.postureState]);
+  }, [phase, isCameraActive, completeExercise, getLatestVisionState]);
 
-  // =========================================================================
-  // ACTIVE POSTURE STABILITY TIMER & PROGRESS TRACKER
-  // Accumulates hold time when in Good Posture until 10 seconds is reached
-  // =========================================================================
-  useEffect(() => {
-    if (phase !== "ACTIVE") {
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = null;
-      }
-      return;
-    }
-
-    sessionStartTimeRef.current = Date.now();
-    lastSampleTimeRef.current = Date.now();
-
-    timerIntervalRef.current = setInterval(() => {
-      const now = Date.now();
-      const deltaMs = lastSampleTimeRef.current ? now - lastSampleTimeRef.current : 100;
-      lastSampleTimeRef.current = now;
-
-      setElapsedTotalMs((prev) => prev + deltaMs);
-
-      // Record sample metrics
-      totalSamplesCountRef.current += 1;
-
-      if (visionState.hasPose) {
-        trackedSamplesCountRef.current += 1;
-
-        if (analysis.isUpright) {
-          goodPostureSamplesCountRef.current += 1;
-
-          setTimeInCorrectPosture((prev) => {
-            const next = prev + deltaMs / 1000;
-            if (next >= REQUIRED_STABILITY_SECONDS) {
-              // Complete Exercise
-              setTimeout(() => {
-                completeExercise(next);
-              }, 100);
-              return REQUIRED_STABILITY_SECONDS;
-            }
-            return next;
-          });
-        }
-      }
-    }, 100);
-
-    return () => {
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = null;
-      }
-    };
-  }, [phase, visionState.hasPose, analysis.isUpright]);
-
-  // Complete exercise and generate summary
-  const completeExercise = useCallback(
-    (finalGoodHoldSecs: number) => {
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = null;
-      }
-
-      const totalElapsedSec = (Date.now() - (sessionStartTimeRef.current || Date.now())) / 1000;
-      const summary = calculatePostureAlignmentSummary({
-        totalDurationSeconds: Math.max(totalElapsedSec, finalGoodHoldSecs),
-        totalSamples: totalSamplesCountRef.current,
-        trackedSamples: trackedSamplesCountRef.current,
-        goodPostureSamples: goodPostureSamplesCountRef.current,
-        timeInCorrectPostureSeconds: finalGoodHoldSecs,
-        requiredStabilitySeconds: REQUIRED_STABILITY_SECONDS,
-      });
-
-      setSessionSummary(summary);
-      setPhase("COMPLETED");
-    },
-    [REQUIRED_STABILITY_SECONDS]
-  );
-
-  // Start exercise handler: checks camera, runs countdown
+  // Start exercise handler: checks camera, runs countdown and establishes neutral baseline
   const handleStart = async () => {
     if (!isCameraActive) {
       try {
@@ -342,9 +569,15 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
 
     setTimeInCorrectPosture(0);
     setElapsedTotalMs(0);
-    totalSamplesCountRef.current = 0;
-    trackedSamplesCountRef.current = 0;
-    goodPostureSamplesCountRef.current = 0;
+    smootherRef.current.reset();
+    trackerRef.current.reset();
+    lastMidShoulderRef.current = null;
+    calibratedBaselineRef.current = null;
+    countdownSamplesRef.current = [];
+    setIsCalibrated(false);
+    setIsSessionSaved(false);
+    setTrackerState(trackerRef.current.getState());
+    setCurrentAnalysis(analyzePostureAlignment(null));
     setSessionSummary(null);
 
     setPhase("COUNTDOWN");
@@ -355,6 +588,16 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
       count -= 1;
       if (count <= 0) {
         clearInterval(cdInterval);
+        // Establish neutral baseline from countdown samples
+        const samples = countdownSamplesRef.current;
+        if (samples.length >= 2) {
+          const avgPitch = Math.round(samples.reduce((a, s) => a + s.pitch, 0) / samples.length);
+          const avgShoulder = Math.round(samples.reduce((a, s) => a + s.shoulderTilt, 0) / samples.length);
+          const avgOffset = parseFloat((samples.reduce((a, s) => a + s.offset, 0) / samples.length).toFixed(3));
+          calibratedBaselineRef.current = { pitch: avgPitch, shoulderTilt: avgShoulder, offset: avgOffset };
+          trackerRef.current.calibrateBaseline(avgPitch, avgShoulder, avgOffset);
+          setIsCalibrated(true);
+        }
         setPhase("ACTIVE");
       } else {
         setCountdownValue(count);
@@ -366,6 +609,42 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
     handleStart();
   };
 
+  const handleRecalibrate = () => {
+    handleStart();
+  };
+
+  // Save session record to persistent storage
+  const handleSaveSession = async () => {
+    if (!sessionSummary || isSessionSaved || isSavingSession) return;
+    setIsSavingSession(true);
+    try {
+      const completedSession = {
+        sessionId: `posture-${Date.now()}`,
+        patientId: patient?.id || "anonymous-patient",
+        patientName: patient?.fullName || "Anonymous Patient",
+        startTime: sessionStartTimeRef.current || Date.now(),
+        durationMs: sessionSummary.durationSeconds * 1000,
+        measurementCount: Math.round(sessionSummary.durationSeconds * 10),
+        dataSource: "webcam-optical",
+        exerciseType: "posture-alignment",
+        summary: {
+          durationFormatted: sessionSummary.formattedDuration,
+          timeInCorrectPostureSeconds: sessionSummary.timeInCorrectPostureSeconds,
+          postureAlignmentPercentage: sessionSummary.postureAlignmentPercentage,
+          poseTrackingAvailabilityPercent: sessionSummary.poseTrackingAvailabilityPercent,
+          clinicalDisclaimer: sessionSummary.disclosure,
+        },
+      };
+      await SessionStorageService.saveSession(completedSession as any);
+      setIsSessionSaved(true);
+    } catch (err) {
+      console.warn("Failed to save posture session:", err);
+      setIsSessionSaved(true);
+    } finally {
+      setIsSavingSession(false);
+    }
+  };
+
   // Stability progress percentage
   const stabilityProgressPercent = Math.min(
     100,
@@ -374,7 +653,7 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
 
   // Feedback banner styling
   const getFeedbackBannerStyle = () => {
-    if (!visionState.hasPose) {
+    if (!isCameraActive || trackerState.isTrackingLost) {
       return {
         bg: "rgba(241, 245, 249, 0.95)",
         border: "#94A3B8",
@@ -382,7 +661,7 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
         icon: <Eye size={24} color="#64748B" />,
       };
     }
-    if (analysis.isUpright) {
+    if (trackerState.guidanceMessage === "Good posture — hold naturally") {
       return {
         bg: "rgba(236, 253, 245, 0.95)",
         border: "#10B981",
@@ -847,6 +1126,8 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
+            flexWrap: "wrap",
+            gap: "12px",
             marginTop: "8px",
           }}
         >
@@ -863,25 +1144,56 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
               }}
             >
               <ArrowLeft size={16} />
-              <span>Back to Library</span>
+              <span>Back to Exercises</span>
             </button>
           )}
 
-          <button
-            onClick={handleRestart}
-            className="btn-primary"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              padding: "12px 24px",
-              fontSize: "0.9375rem",
-              fontWeight: 700,
-            }}
-          >
-            <RotateCcw size={16} />
-            <span>Repeat Exercise</span>
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <button
+              onClick={handleSaveSession}
+              disabled={isSessionSaved || isSavingSession}
+              className={isSessionSaved ? "btn-outline" : "btn-primary"}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "12px 20px",
+                fontSize: "0.9375rem",
+                fontWeight: 700,
+                backgroundColor: isSessionSaved ? "#ECFDF5" : undefined,
+                color: isSessionSaved ? "#065F46" : undefined,
+                borderColor: isSessionSaved ? "#A7F3D0" : undefined,
+              }}
+            >
+              {isSessionSaved ? (
+                <>
+                  <CheckCircle2 size={16} color="#059669" />
+                  <span>Session Saved ✓</span>
+                </>
+              ) : (
+                <>
+                  <Save size={16} />
+                  <span>{isSavingSession ? "Saving..." : "Save Session"}</span>
+                </>
+              )}
+            </button>
+
+            <button
+              onClick={handleRestart}
+              className="btn-primary"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "12px 24px",
+                fontSize: "0.9375rem",
+                fontWeight: 700,
+              }}
+            >
+              <RotateCcw size={16} />
+              <span>Try Again</span>
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -941,23 +1253,62 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
           </div>
         </div>
 
-        {/* Camera device status pill */}
-        <div
-          style={{
-            padding: "5px 12px",
-            borderRadius: "20px",
-            fontSize: "0.75rem",
-            fontWeight: 700,
-            display: "flex",
-            alignItems: "center",
-            gap: "6px",
-            backgroundColor: isCameraActive ? "#ECFDF5" : "#FEF2F2",
-            color: isCameraActive ? "#065F46" : "#991B1B",
-            border: `1px solid ${isCameraActive ? "#A7F3D0" : "#FECACA"}`,
-          }}
-        >
-          {isCameraActive ? <Camera size={13} /> : <CameraOff size={13} />}
-          <span>{cameraDeviceName}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          {isCalibrated && (
+            <span
+              style={{
+                padding: "4px 10px",
+                borderRadius: "12px",
+                backgroundColor: "#ECFDF5",
+                color: "#065F46",
+                fontSize: "0.6875rem",
+                fontWeight: 700,
+                border: "1px solid #A7F3D0",
+              }}
+            >
+              Baseline Calibrated ✓
+            </span>
+          )}
+
+          <button
+            onClick={handleRecalibrate}
+            className="btn-ghost"
+            style={{
+              padding: "5px 12px",
+              borderRadius: "20px",
+              fontSize: "0.75rem",
+              fontWeight: 700,
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              border: "1px solid #CBD5E1",
+              backgroundColor: "#FFFFFF",
+              color: "#475569",
+            }}
+            title="Recalibrate neutral posture baseline"
+          >
+            <Sliders size={13} />
+            <span>Recalibrate</span>
+          </button>
+
+          {/* Camera device status pill */}
+          <div
+            style={{
+              padding: "5px 12px",
+              borderRadius: "20px",
+              fontSize: "0.75rem",
+              fontWeight: 700,
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              backgroundColor: isCameraActive ? "#ECFDF5" : "#FEF2F2",
+              color: isCameraActive ? "#065F46" : "#991B1B",
+              border: `1px solid ${isCameraActive ? "#A7F3D0" : "#FECACA"}`,
+            }}
+          >
+            {isCameraActive ? <Camera size={13} /> : <CameraOff size={13} />}
+            <span>{cameraDeviceName}</span>
+          </div>
         </div>
       </div>
 
@@ -984,7 +1335,7 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
               Real-Time Guidance
             </div>
             <div style={{ fontSize: "1.375rem", fontWeight: 800, color: feedbackStyle.text }}>
-              {analysis.feedbackMessage}
+              {trackerState.guidanceMessage}
             </div>
           </div>
         </div>
@@ -999,12 +1350,23 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
             backgroundColor: "#FFFFFF",
             border: `1px solid ${feedbackStyle.border}`,
             color: feedbackStyle.text,
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
           }}
         >
-          {analysis.hasPose ? (
-            analysis.isUpright ? "Alignment: Optimal" : "Alignment: Adjusting"
+          {!isCameraActive ? (
+            <span style={{ color: "#991B1B" }}>Camera: Unavailable</span>
+          ) : trackerState.isTrackingLost ? (
+            <span>Pose: Not Detected</span>
+          ) : trackerState.isInGracePeriod ? (
+            <span style={{ color: "#D97706" }}>Grace Period (Adjust)</span>
+          ) : trackerState.guidanceMessage === "Adjusting posture" ? (
+            <span style={{ color: "#D97706" }}>Adjusting Posture</span>
+          ) : currentAnalysis.isUpright ? (
+            <span style={{ color: "#059669" }}>Alignment: Optimal</span>
           ) : (
-            "Pose: Not Detected"
+            <span style={{ color: "#D97706" }}>Alignment: Adjusting</span>
           )}
         </div>
       </div>
@@ -1029,8 +1391,13 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
           <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
             Posture Stability
           </div>
-          <div style={{ fontSize: "0.875rem", fontWeight: 800, color: "#0D9488" }}>
-            {timeInCorrectPosture.toFixed(1)} / {REQUIRED_STABILITY_SECONDS}.0 s ({stabilityProgressPercent}%)
+          <div style={{ fontSize: "0.875rem", fontWeight: 800, color: trackerState.isInGracePeriod ? "#D97706" : "#0D9488", fontVariantNumeric: "tabular-nums" }}>
+            {trackerState.timeInCorrectPostureSeconds.toFixed(1)} / {REQUIRED_STABILITY_SECONDS}.0 s ({stabilityProgressPercent}%)
+            {trackerState.timeInCorrectPostureSeconds < REQUIRED_STABILITY_SECONDS && (
+              <span style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--text-secondary)", marginLeft: "8px", fontVariantNumeric: "tabular-nums" }}>
+                ({trackerState.remainingSeconds.toFixed(1)}s remaining)
+              </span>
+            )}
           </div>
         </div>
 
@@ -1056,8 +1423,13 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
           />
         </div>
         <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: "6px" }}>
-          <span>Maintain correct upright posture for {REQUIRED_STABILITY_SECONDS} seconds</span>
-          <span>Elapsed: {(elapsedTotalMs / 1000).toFixed(1)}s • {stabilityProgressPercent === 100 ? "Complete ✓" : "In Progress"}</span>
+          <span>Maintain upright posture for {REQUIRED_STABILITY_SECONDS} seconds</span>
+          <span style={{ fontVariantNumeric: "tabular-nums" }}>
+            {trackerState.isInGracePeriod ? (
+              <span style={{ color: "#D97706", fontWeight: 600 }}>Grace period active — realign now • </span>
+            ) : null}
+            Elapsed: {(elapsedTotalMs / 1000).toFixed(1)}s • {stabilityProgressPercent === 100 ? "Complete ✓" : !isCameraActive ? "Paused (Camera unavailable)" : trackerState.isTrackingLost ? "Paused (Tracking lost)" : trackerState.guidanceMessage === "Hold steady — avoid moving" ? "Paused (Movement detected)" : !currentAnalysis.isUpright ? `Paused (${trackerState.guidanceMessage})` : "In Progress (Optimal)"}
+          </span>
         </div>
       </div>
 
@@ -1075,20 +1447,53 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
           justifyContent: "center",
         }}
       >
-        {/* Live Camera Video Feed */}
+        {/* Live Camera Video Feed & Skeleton Overlay Viewport */}
         {isCameraActive ? (
-          <video
-            ref={videoRef}
-            playsInline
-            muted
-            autoPlay
+          <div
             style={{
+              position: "relative",
               width: "100%",
               maxHeight: "560px",
-              objectFit: "contain",
-              transform: isMirrored ? "scaleX(-1)" : "none",
+              aspectRatio:
+                videoDimensions.width > 0 && videoDimensions.height > 0
+                  ? `${videoDimensions.width} / ${videoDimensions.height}`
+                  : "4 / 3",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              overflow: "hidden",
             }}
-          />
+          >
+            <video
+              ref={videoRef}
+              playsInline
+              muted
+              autoPlay
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "fill",
+                transform: isMirrored ? "scaleX(-1)" : "none",
+              }}
+            />
+
+            {/* 2D MediaPipe Skeleton Canvas Overlay */}
+            <canvas
+              ref={canvasRef}
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                height: "100%",
+                pointerEvents: "none",
+                transform: isMirrored ? "scaleX(-1)" : "none",
+              }}
+            />
+          </div>
         ) : (
           <div
             style={{
@@ -1122,23 +1527,6 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
           </div>
         )}
 
-        {/* 2D MediaPipe Skeleton Canvas Overlay */}
-        {isCameraActive && (
-          <canvas
-            ref={canvasRef}
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              width: "100%",
-              height: "100%",
-              pointerEvents: "none",
-              objectFit: "contain",
-              transform: isMirrored ? "scaleX(-1)" : "none",
-            }}
-          />
-        )}
-
         {/* Countdown Overlay */}
         {phase === "COUNTDOWN" && (
           <div
@@ -1160,39 +1548,45 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
                 fontWeight: 900,
                 color: "#FFFFFF",
                 textShadow: "0 4px 20px rgba(0,0,0,0.5)",
+                fontVariantNumeric: "tabular-nums",
               }}
             >
               {countdownValue}
             </div>
-            <div style={{ fontSize: "1rem", color: "#E2E8F0", fontWeight: 600 }}>
-              Get into upright position...
+            <div style={{ fontSize: "1.25rem", color: "#F1F5F9", fontWeight: 700 }}>
+              Calibrating Neutral Upright Posture...
+            </div>
+            <div style={{ fontSize: "0.875rem", color: "#94A3B8", fontWeight: 500 }}>
+              Stand naturally upright facing the camera
             </div>
           </div>
         )}
 
-        {/* Pose Not Detected HUD Overlay */}
-        {phase === "ACTIVE" && isCameraActive && !visionState.hasPose && (
+        {/* Tracking Loss Alert Banner */}
+        {phase === "ACTIVE" && isCameraActive && trackerState.isTrackingLost && (
           <div
             style={{
               position: "absolute",
-              bottom: "20px",
+              top: "20px",
               left: "50%",
               transform: "translateX(-50%)",
-              backgroundColor: "rgba(15, 23, 42, 0.85)",
-              border: "1px solid rgba(255, 255, 255, 0.2)",
+              backgroundColor: "rgba(220, 38, 38, 0.92)",
+              border: "1px solid rgba(255, 255, 255, 0.3)",
               backdropFilter: "blur(8px)",
-              padding: "8px 20px",
-              borderRadius: "20px",
-              color: "#F8FAFC",
+              padding: "10px 24px",
+              borderRadius: "24px",
+              color: "#FFFFFF",
               fontSize: "0.875rem",
               fontWeight: 700,
               display: "flex",
               alignItems: "center",
-              gap: "8px",
+              gap: "10px",
+              boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+              zIndex: 10,
             }}
           >
-            <Eye size={16} color="#38BDF8" />
-            <span>Pose: Not Detected — Step into camera view</span>
+            <AlertTriangle size={18} color="#FFFFFF" />
+            <span>Tracking Lost — Timer Paused • Step into camera view</span>
           </div>
         )}
       </div>
@@ -1218,18 +1612,18 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
           <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-secondary)" }}>
             Shoulder Alignment
           </div>
-          <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--text-main)" }}>
-            {analysis.hasPose && analysis.shoulderTiltDeg !== null
-              ? `${analysis.shoulderTiltDeg > 0 ? "+" : ""}${analysis.shoulderTiltDeg}°`
+          <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--text-main)", fontVariantNumeric: "tabular-nums" }}>
+            {currentAnalysis.hasPose && currentAnalysis.shoulderTiltDeg !== null
+              ? `${currentAnalysis.shoulderTiltDeg > 0 ? "+" : ""}${currentAnalysis.shoulderTiltDeg}°`
               : "--"}
           </div>
           <div style={{ fontSize: "0.6875rem", color: "var(--text-muted)" }}>
-            {analysis.hasPose
-              ? Math.abs(analysis.shoulderTiltDeg ?? 0) <= 4
-                ? "Level (Normal)"
-                : analysis.shoulderTiltDeg! > 0
-                ? "Right shoulder lowered"
-                : "Left shoulder lowered"
+            {currentAnalysis.hasPose
+              ? Math.abs(currentAnalysis.shoulderTiltDeg ?? 0) <= DEFAULT_POSTURE_TOLERANCES.shoulderTiltToleranceDeg
+                ? "Level (Normal tolerance)"
+                : currentAnalysis.shoulderTiltDeg! > 0
+                  ? "Right shoulder lowered"
+                  : "Left shoulder lowered"
               : "Pose not detected"}
           </div>
         </div>
@@ -1247,18 +1641,18 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
           <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-secondary)" }}>
             Hip Alignment
           </div>
-          <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--text-main)" }}>
-            {analysis.hasPose && analysis.hipTiltDeg !== null
-              ? `${analysis.hipTiltDeg > 0 ? "+" : ""}${analysis.hipTiltDeg}°`
+          <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--text-main)", fontVariantNumeric: "tabular-nums" }}>
+            {currentAnalysis.hasPose && currentAnalysis.hipTiltDeg !== null
+              ? `${currentAnalysis.hipTiltDeg > 0 ? "+" : ""}${currentAnalysis.hipTiltDeg}°`
               : "--"}
           </div>
           <div style={{ fontSize: "0.6875rem", color: "var(--text-muted)" }}>
-            {analysis.hasPose
-              ? Math.abs(analysis.hipTiltDeg ?? 0) <= 5
-                ? "Level (Normal)"
-                : analysis.hipTiltDeg! > 0
-                ? "Right hip dipped"
-                : "Left hip dipped"
+            {currentAnalysis.hasPose
+              ? Math.abs(currentAnalysis.hipTiltDeg ?? 0) <= DEFAULT_POSTURE_TOLERANCES.hipTiltToleranceDeg
+                ? "Level (Normal tolerance)"
+                : currentAnalysis.hipTiltDeg! > 0
+                  ? "Right hip dipped"
+                  : "Left hip dipped"
               : "Pose not detected"}
           </div>
         </div>
@@ -1276,18 +1670,18 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
           <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-secondary)" }}>
             Trunk Sagittal Pitch
           </div>
-          <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--text-main)" }}>
-            {analysis.hasPose && analysis.trunkPitchDeg !== null
-              ? `${analysis.trunkPitchDeg > 0 ? "+" : ""}${analysis.trunkPitchDeg}°`
+          <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--text-main)", fontVariantNumeric: "tabular-nums" }}>
+            {currentAnalysis.hasPose && currentAnalysis.trunkPitchDeg !== null
+              ? `${currentAnalysis.trunkPitchDeg > 0 ? "+" : ""}${currentAnalysis.trunkPitchDeg}°`
               : "--"}
           </div>
           <div style={{ fontSize: "0.6875rem", color: "var(--text-muted)" }}>
-            {analysis.hasPose
-              ? Math.abs(analysis.trunkPitchDeg ?? 0) <= 5
-                ? "Vertical (Normal)"
-                : analysis.trunkPitchDeg! > 0
-                ? "Leaning forward"
-                : "Leaning backward"
+            {currentAnalysis.hasPose
+              ? Math.abs(currentAnalysis.trunkPitchDeg ?? 0) <= DEFAULT_POSTURE_TOLERANCES.trunkPitchToleranceDeg
+                ? "Upright (Normal tolerance)"
+                : currentAnalysis.trunkPitchDeg! > 0
+                  ? "Leaning forward"
+                  : "Leaning backward"
               : "Pose not detected"}
           </div>
         </div>
@@ -1305,13 +1699,13 @@ export const PostureAlignmentExercise: React.FC<PostureAlignmentExerciseProps> =
           <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-secondary)" }}>
             Left/Right Symmetry
           </div>
-          <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--text-main)" }}>
-            {analysis.hasPose && analysis.symmetryScore !== null
-              ? `${analysis.symmetryScore}%`
+          <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--text-main)", fontVariantNumeric: "tabular-nums" }}>
+            {currentAnalysis.hasPose && currentAnalysis.symmetryScore !== null
+              ? `${currentAnalysis.symmetryScore}%`
               : "--"}
           </div>
           <div style={{ fontSize: "0.6875rem", color: "var(--text-muted)" }}>
-            {analysis.hasPose ? "Coronal bilateral symmetry" : "Pose not detected"}
+            {currentAnalysis.hasPose ? "Coronal bilateral symmetry" : "Pose not detected"}
           </div>
         </div>
       </div>

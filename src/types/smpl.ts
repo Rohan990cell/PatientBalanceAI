@@ -486,8 +486,10 @@ export function normalizedCOPToBoardWorld3D(
   copOffset: { x: number; y: number },
   surfaceHeight: number = 0.040
 ): [number, number, number] {
-  const clampedX = Math.max(-1, Math.min(1, copOffset.x));
-  const clampedY = Math.max(-1, Math.min(1, copOffset.y));
+  const safeX = typeof copOffset?.x === "number" && Number.isFinite(copOffset.x) ? copOffset.x : 0;
+  const safeY = typeof copOffset?.y === "number" && Number.isFinite(copOffset.y) ? copOffset.y : 0;
+  const clampedX = Math.max(-1, Math.min(1, safeX));
+  const clampedY = Math.max(-1, Math.min(1, safeY));
 
   const clinicalCOPX = clampedX * 0.18;
   const clinicalCOPY = clampedY * 0.10;

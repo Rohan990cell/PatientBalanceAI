@@ -25,22 +25,29 @@ export const DevSimulationControls: React.FC<DevSimulationControlsProps> = ({
   const [swayActive, setSwayActive] = React.useState(false);
   const swayAngleRef = useRef(0);
   const swayTimerRef = useRef<number | null>(null);
+  const lastFrameTimeRef = useRef<number>(0);
 
-  // Dynamic Gentle Sway Animation for Testing
+  // Dynamic Gentle Sway Animation for Testing (bounded 30 Hz loop to prevent React thrashing)
   useEffect(() => {
     if (!isSimulated || !swayActive) {
-      if (swayTimerRef.current) cancelAnimationFrame(swayTimerRef.current);
+      if (swayTimerRef.current) {
+        cancelAnimationFrame(swayTimerRef.current);
+        swayTimerRef.current = null;
+      }
       return;
     }
 
-    const stepSway = () => {
-      swayAngleRef.current += 0.03;
-      // Elliptical postural sway pattern (amplitude 0.45 X, 0.35 Y)
-      const newX = parseFloat((Math.sin(swayAngleRef.current) * 0.45).toFixed(2));
-      const newY = parseFloat((Math.cos(swayAngleRef.current * 0.7) * 0.35).toFixed(2));
+    const stepSway = (timestamp: number) => {
+      if (!lastFrameTimeRef.current || timestamp - lastFrameTimeRef.current >= 33) {
+        lastFrameTimeRef.current = timestamp;
+        swayAngleRef.current += 0.05;
+        // Elliptical postural sway pattern (amplitude 0.45 X, 0.35 Y)
+        const newX = parseFloat((Math.sin(swayAngleRef.current) * 0.45).toFixed(2));
+        const newY = parseFloat((Math.cos(swayAngleRef.current * 0.7) * 0.35).toFixed(2));
 
-      onChangeCopX(newX);
-      onChangeCopY(newY);
+        onChangeCopX(newX);
+        onChangeCopY(newY);
+      }
 
       swayTimerRef.current = requestAnimationFrame(stepSway);
     };
@@ -48,7 +55,10 @@ export const DevSimulationControls: React.FC<DevSimulationControlsProps> = ({
     swayTimerRef.current = requestAnimationFrame(stepSway);
 
     return () => {
-      if (swayTimerRef.current) cancelAnimationFrame(swayTimerRef.current);
+      if (swayTimerRef.current) {
+        cancelAnimationFrame(swayTimerRef.current);
+        swayTimerRef.current = null;
+      }
     };
   }, [isSimulated, swayActive, onChangeCopX, onChangeCopY]);
 

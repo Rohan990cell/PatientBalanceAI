@@ -48,7 +48,7 @@ const mockSimSession: BalanceSession = {
   schemaVersion: 1,
   sessionId: "session-20260930-testsim",
   patientId: "pat-001",
-  patientName: "Eleanor Vance",
+  patientName: "Rohan",
   startTime: "2026-09-30T13:00:00.000Z",
   endTime: "2026-09-30T13:00:30.000Z",
   durationMs: 30000,

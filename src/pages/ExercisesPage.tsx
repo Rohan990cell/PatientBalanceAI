@@ -27,13 +27,22 @@ import { MultimodalExerciseTelemetry } from "../components/exercise/MultimodalEx
 import { WeightShiftCopTargetExercise } from "../components/exercise/WeightShiftCopTargetExercise";
 import { PostureBalanceMultimodalExercise } from "../components/exercise/PostureBalanceMultimodalExercise";
 import { PostureAlignmentExercise } from "../components/exercise/PostureAlignmentExercise";
+import { DirectionalWeightShiftExercise } from "../components/exercise/DirectionalWeightShiftExercise";
+import { MultimodalLegRaiseExercise } from "../components/exercise/MultimodalLegRaiseExercise";
 
 interface ExercisesPageProps {
   patient?: PatientProfile;
   onBack?: () => void;
+  onResultFullScreenChange?: (isFullScreen: boolean) => void;
+  onNavigateToDashboard?: () => void;
 }
 
-export const ExercisesPage: React.FC<ExercisesPageProps> = ({ patient, onBack }) => {
+export const ExercisesPage: React.FC<ExercisesPageProps> = ({
+  patient,
+  onBack,
+  onResultFullScreenChange,
+  onNavigateToDashboard,
+}) => {
   const {
     engineState,
     library,
@@ -157,6 +166,38 @@ export const ExercisesPage: React.FC<ExercisesPageProps> = ({ patient, onBack })
   // ==========================================
   if (engineState.currentExercise?.id === "posture-alignment") {
     return <PostureAlignmentExercise patient={patient} onExit={returnToLibrary} />;
+  }
+
+  // ==========================================
+  // PHASE D: WII BALANCE BOARD ONLY INTERACTIVE REHABILITATION EXERCISE
+  // ==========================================
+  if (engineState.currentExercise?.id === "directional-weight-shift") {
+    return (
+      <DirectionalWeightShiftExercise
+        patient={patient}
+        onExit={() => {
+          onResultFullScreenChange?.(false);
+          returnToLibrary();
+        }}
+        onResultFullScreenChange={onResultFullScreenChange}
+        onNavigateToDashboard={() => {
+          onResultFullScreenChange?.(false);
+          returnToLibrary();
+          if (onNavigateToDashboard) {
+            onNavigateToDashboard();
+          } else if (onBack) {
+            onBack();
+          }
+        }}
+      />
+    );
+  }
+
+  // ==========================================
+  // PHASE E: MULTIMODAL LEG RAISE & BALANCE REHABILITATION EXERCISE
+  // ==========================================
+  if (engineState.currentExercise?.id === "multimodal-leg-raise-balance") {
+    return <MultimodalLegRaiseExercise patient={patient} onExit={returnToLibrary} />;
   }
 
   // ==========================================
@@ -349,267 +390,383 @@ export const ExercisesPage: React.FC<ExercisesPageProps> = ({ patient, onBack })
           </div>
         )}
 
-        {/* Wednesday AIIMS Demo Spotlight Banner */}
-        <div
-          className="medical-card"
-          style={{
-            padding: "20px 24px",
-            background: "linear-gradient(135deg, #F0FDFA 0%, #E6FFFA 100%)",
-            border: "2px solid var(--border-teal, #99F6E4)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            flexWrap: "wrap",
-            gap: "16px",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-            <div
+        {/* Core Rehabilitation Protocols (4 Interactive Exercises) */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          {/* Exercise 1: Weight Shift — COP Target */}
+          <div
+            className="medical-card"
+            style={{
+              padding: "14px 20px",
+              background: "linear-gradient(135deg, #FFFFFF 0%, #F0FDFA 100%)",
+              border: "1px solid #CCFBF1",
+              borderRadius: "14px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "16px",
+              flexWrap: "wrap",
+              boxShadow: "0 1px 3px rgba(15, 23, 42, 0.04)",
+              transition: "all 0.2s ease",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "14px", flex: "1 1 540px", minWidth: 0 }}>
+              <div
+                style={{
+                  width: "40px",
+                  height: "40px",
+                  borderRadius: "10px",
+                  background: "var(--teal-primary)",
+                  color: "#FFFFFF",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                }}
+              >
+                <Scale size={20} />
+              </div>
+              <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap", marginBottom: "3px" }}>
+                  <span
+                    style={{
+                      fontSize: "0.6875rem",
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.04em",
+                      color: "#0F766E",
+                      background: "rgba(13, 148, 136, 0.12)",
+                      padding: "2px 7px",
+                      borderRadius: "5px",
+                    }}
+                  >
+                    Wednesday Demo Exercise 1 • Board Only
+                  </span>
+                  <span
+                    style={{
+                      fontSize: "0.6875rem",
+                      fontWeight: 700,
+                      color: "#059669",
+                      background: "#ECFDF5",
+                      padding: "2px 7px",
+                      borderRadius: "5px",
+                      border: "1px solid #A7F3D0",
+                    }}
+                  >
+                    Camera Not Required
+                  </span>
+                </div>
+                <h3 style={{ fontSize: "1.0625rem", fontWeight: 700, color: "var(--text-main)", margin: "0 0 2px 0", letterSpacing: "-0.01em" }}>
+                  Weight Shift — COP Target
+                </h3>
+                <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.4 }}>
+                  Shift body weight to move the Center of Pressure toward displayed safe targets (Center, Left, Right, Front, Back).
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => selectExercise("weight-shift-cop-target")}
+              className="btn-primary"
               style={{
-                width: "48px",
-                height: "48px",
-                borderRadius: "14px",
+                padding: "8px 18px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px",
+                fontSize: "0.8125rem",
+                fontWeight: 700,
+                cursor: "pointer",
+                borderRadius: "8px",
+                flexShrink: 0,
+                whiteSpace: "nowrap",
                 background: "var(--teal-primary)",
-                color: "#FFFFFF",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
               }}
             >
-              <Scale size={24} />
-            </div>
-            <div>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                <span
-                  style={{
-                    fontSize: "0.6875rem",
-                    fontWeight: 800,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.06em",
-                    color: "var(--teal-primary)",
-                    background: "rgba(13, 148, 136, 0.12)",
-                    padding: "2px 8px",
-                    borderRadius: "6px",
-                  }}
-                >
-                  Wednesday Demo Exercise 1 &bull; Board Only
-                </span>
-                <span
-                  style={{
-                    fontSize: "0.6875rem",
-                    fontWeight: 700,
-                    color: "var(--green-primary)",
-                    background: "#ECFDF5",
-                    padding: "2px 8px",
-                    borderRadius: "6px",
-                    border: "1px solid #A7F3D0",
-                  }}
-                >
-                  Camera Not Required
-                </span>
-              </div>
-              <h3 style={{ fontSize: "1.125rem", fontWeight: 800, color: "var(--text-main)", margin: "4px 0 2px 0" }}>
-                Weight Shift — COP Target
-              </h3>
-              <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", margin: 0 }}>
-                Shift body weight to move the Center of Pressure toward displayed safe targets (Center, Left, Right, Front, Back).
-              </p>
-            </div>
+              <Play size={14} fill="#FFFFFF" />
+              <span>Launch Demo Exercise 1</span>
+            </button>
           </div>
 
-          <button
-            onClick={() => selectExercise("weight-shift-cop-target")}
-            className="btn-primary"
+          {/* Exercise 2: Posture + Balance Exercise */}
+          <div
+            className="medical-card"
             style={{
-              padding: "10px 20px",
+              padding: "14px 20px",
+              background: "linear-gradient(135deg, #FFFFFF 0%, #F0FDFA 100%)",
+              border: "1px solid #CCFBF1",
+              borderRadius: "14px",
               display: "flex",
               alignItems: "center",
-              gap: "8px",
-              fontSize: "0.875rem",
-              fontWeight: 700,
-              cursor: "pointer",
+              justifyContent: "space-between",
+              gap: "16px",
+              flexWrap: "wrap",
+              boxShadow: "0 1px 3px rgba(15, 23, 42, 0.04)",
+              transition: "all 0.2s ease",
             }}
           >
-            <Play size={16} fill="#FFFFFF" />
-            <span>Launch Demo Exercise 1</span>
-          </button>
-        </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "14px", flex: "1 1 540px", minWidth: 0 }}>
+              <div
+                style={{
+                  width: "40px",
+                  height: "40px",
+                  borderRadius: "10px",
+                  background: "var(--teal-primary)",
+                  color: "#FFFFFF",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                }}
+              >
+                <Activity size={20} />
+              </div>
+              <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap", marginBottom: "3px" }}>
+                  <span
+                    style={{
+                      fontSize: "0.6875rem",
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.04em",
+                      color: "#0F766E",
+                      background: "rgba(13, 148, 136, 0.12)",
+                      padding: "2px 7px",
+                      borderRadius: "5px",
+                    }}
+                  >
+                    Wednesday Demo Exercise 2 • Multimodal
+                  </span>
+                  <span
+                    style={{
+                      fontSize: "0.6875rem",
+                      fontWeight: 700,
+                      color: "var(--teal-primary)",
+                      background: "var(--bg-subtle-mint)",
+                      padding: "2px 7px",
+                      borderRadius: "5px",
+                      border: "1px solid var(--border-mint)",
+                    }}
+                  >
+                    Wii Board + Intel RealSense (2D Pose)
+                  </span>
+                </div>
+                <h3 style={{ fontSize: "1.0625rem", fontWeight: 700, color: "var(--text-main)", margin: "0 0 2px 0", letterSpacing: "-0.01em" }}>
+                  Posture + Balance Exercise
+                </h3>
+                <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.4 }}>
+                  Correlates live 2D body skeleton lean (MediaPipe) with plantar Center of Pressure weight distribution.
+                </p>
+              </div>
+            </div>
 
-        {/* Wednesday AIIMS Demo 2 Spotlight Banner (Phase B: Wii Board + Intel RealSense / Camera 2D Pose) */}
-        <div
-          className="medical-card"
-          style={{
-            padding: "20px 24px",
-            background: "linear-gradient(135deg, #F8FAFC 0%, #F0FDFA 100%)",
-            border: "2px solid #CBD5E1",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            flexWrap: "wrap",
-            gap: "16px",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-            <div
+            <button
+              onClick={() => selectExercise("posture-balance-multimodal")}
+              className="btn-primary"
               style={{
-                width: "48px",
-                height: "48px",
-                borderRadius: "14px",
+                padding: "8px 18px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px",
+                fontSize: "0.8125rem",
+                fontWeight: 700,
+                cursor: "pointer",
+                borderRadius: "8px",
+                flexShrink: 0,
+                whiteSpace: "nowrap",
                 background: "var(--teal-primary)",
-                color: "#FFFFFF",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
               }}
             >
-              <Activity size={24} />
-            </div>
-            <div>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                <span
-                  style={{
-                    fontSize: "0.6875rem",
-                    fontWeight: 800,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.06em",
-                    color: "var(--teal-primary)",
-                    background: "rgba(13, 148, 136, 0.12)",
-                    padding: "2px 8px",
-                    borderRadius: "6px",
-                  }}
-                >
-                  Wednesday Demo Exercise 2 &bull; Multimodal
-                </span>
-                <span
-                  style={{
-                    fontSize: "0.6875rem",
-                    fontWeight: 700,
-                    color: "var(--teal-primary)",
-                    background: "var(--bg-subtle-mint)",
-                    padding: "2px 8px",
-                    borderRadius: "6px",
-                    border: "1px solid var(--border-mint)",
-                  }}
-                >
-                  Wii Board + Intel RealSense (2D Pose)
-                </span>
-              </div>
-              <h3 style={{ fontSize: "1.125rem", fontWeight: 800, color: "var(--text-main)", margin: "4px 0 2px 0" }}>
-                Posture + Balance Exercise
-              </h3>
-              <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", margin: 0 }}>
-                Correlates live 2D body skeleton lean (MediaPipe) with plantar Center of Pressure weight distribution.
-              </p>
-            </div>
+              <Play size={14} fill="#FFFFFF" />
+              <span>Launch Demo Exercise 2</span>
+            </button>
           </div>
 
-          <button
-            onClick={() => selectExercise("posture-balance-multimodal")}
-            className="btn-primary"
+          {/* Exercise 3: Posture Alignment Exercise */}
+          <div
+            className="medical-card"
             style={{
-              padding: "10px 20px",
+              padding: "14px 20px",
+              background: "linear-gradient(135deg, #FFFFFF 0%, #F0FDFA 100%)",
+              border: "1px solid #CCFBF1",
+              borderRadius: "14px",
               display: "flex",
               alignItems: "center",
-              gap: "8px",
-              fontSize: "0.875rem",
-              fontWeight: 700,
-              cursor: "pointer",
+              justifyContent: "space-between",
+              gap: "16px",
+              flexWrap: "wrap",
+              boxShadow: "0 1px 3px rgba(15, 23, 42, 0.04)",
+              transition: "all 0.2s ease",
             }}
           >
-            <Play size={16} fill="#FFFFFF" />
-            <span>Launch Demo Exercise 2</span>
-          </button>
-        </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "14px", flex: "1 1 540px", minWidth: 0 }}>
+              <div
+                style={{
+                  width: "40px",
+                  height: "40px",
+                  borderRadius: "10px",
+                  background: "linear-gradient(135deg, #0D9488 0%, #2563EB 100%)",
+                  color: "#FFFFFF",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                }}
+              >
+                <Camera size={20} />
+              </div>
+              <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap", marginBottom: "3px" }}>
+                  <span
+                    style={{
+                      fontSize: "0.6875rem",
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.04em",
+                      color: "#0F766E",
+                      background: "rgba(13, 148, 136, 0.12)",
+                      padding: "2px 7px",
+                      borderRadius: "5px",
+                    }}
+                  >
+                    Phase C Spotlight • Camera Only
+                  </span>
+                  <span
+                    style={{
+                      fontSize: "0.6875rem",
+                      fontWeight: 700,
+                      color: "#1E40AF",
+                      background: "#EFF6FF",
+                      padding: "2px 7px",
+                      borderRadius: "5px",
+                      border: "1px solid #BFDBFE",
+                    }}
+                  >
+                    Wii Board Not Required
+                  </span>
+                </div>
+                <h3 style={{ fontSize: "1.0625rem", fontWeight: 700, color: "var(--text-main)", margin: "0 0 2px 0", letterSpacing: "-0.01em" }}>
+                  Posture Alignment Exercise
+                </h3>
+                <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.4 }}>
+                  Interactive MediaPipe 2D optical pose estimation training upright posture alignment, shoulder/hip symmetry, and stability.
+                </p>
+              </div>
+            </div>
 
-        {/* Phase C Spotlight Banner: Camera-Only Rehabilitation Exercise (Wii Board NOT Required) */}
-        <div
-          className="medical-card"
-          style={{
-            padding: "20px 24px",
-            background: "linear-gradient(135deg, #F0FDFA 0%, #EFF6FF 100%)",
-            border: "2px solid #99F6E4",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            flexWrap: "wrap",
-            gap: "16px",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-            <div
+            <button
+              onClick={() => selectExercise("posture-alignment")}
+              className="btn-primary"
               style={{
-                width: "48px",
-                height: "48px",
-                borderRadius: "14px",
-                background: "linear-gradient(135deg, #0D9488, #2563EB)",
-                display: "flex",
+                padding: "8px 18px",
+                display: "inline-flex",
                 alignItems: "center",
-                justifyContent: "center",
-                color: "#FFFFFF",
+                gap: "8px",
+                fontSize: "0.8125rem",
+                fontWeight: 700,
+                cursor: "pointer",
+                borderRadius: "8px",
                 flexShrink: 0,
+                whiteSpace: "nowrap",
+                background: "var(--teal-primary)",
               }}
             >
-              <Camera size={24} />
-            </div>
-
-            <div>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                <span
-                  style={{
-                    fontSize: "0.6875rem",
-                    fontWeight: 800,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.06em",
-                    backgroundColor: "#CCFBF1",
-                    color: "#0F766E",
-                    padding: "3px 8px",
-                    borderRadius: "6px",
-                  }}
-                >
-                  Phase C Spotlight • Camera Only
-                </span>
-                <span
-                  style={{
-                    fontSize: "0.6875rem",
-                    fontWeight: 700,
-                    textTransform: "uppercase",
-                    backgroundColor: "#DBEAFE",
-                    color: "#1E40AF",
-                    padding: "3px 8px",
-                    borderRadius: "6px",
-                  }}
-                >
-                  Wii Board Not Required
-                </span>
-              </div>
-              <h3 style={{ fontSize: "1.125rem", fontWeight: 800, color: "var(--text-main)", margin: "4px 0 2px 0" }}>
-                Posture Alignment Exercise
-              </h3>
-              <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", margin: 0 }}>
-                Interactive MediaPipe 2D optical pose estimation training upright posture alignment, shoulder/hip symmetry, and stability.
-              </p>
-            </div>
+              <Play size={14} fill="#FFFFFF" />
+              <span>Launch Camera Exercise</span>
+            </button>
           </div>
 
-          <button
-            onClick={() => selectExercise("posture-alignment")}
-            className="btn-primary"
+          {/* Exercise 4: Directional Weight Shift */}
+          <div
+            className="medical-card"
             style={{
-              padding: "10px 20px",
+              padding: "14px 20px",
+              background: "linear-gradient(135deg, #FFFFFF 0%, #F0FDFA 100%)",
+              border: "1px solid #CCFBF1",
+              borderRadius: "14px",
               display: "flex",
               alignItems: "center",
-              gap: "8px",
-              fontSize: "0.875rem",
-              fontWeight: 700,
-              cursor: "pointer",
-              background: "linear-gradient(135deg, #0D9488 0%, #2563EB 100%)",
+              justifyContent: "space-between",
+              gap: "16px",
+              flexWrap: "wrap",
+              boxShadow: "0 1px 3px rgba(15, 23, 42, 0.04)",
+              transition: "all 0.2s ease",
             }}
           >
-            <Play size={16} fill="#FFFFFF" />
-            <span>Launch Camera Exercise</span>
-          </button>
+            <div style={{ display: "flex", alignItems: "center", gap: "14px", flex: "1 1 540px", minWidth: 0 }}>
+              <div
+                style={{
+                  width: "40px",
+                  height: "40px",
+                  borderRadius: "10px",
+                  background: "var(--teal-primary)",
+                  color: "#FFFFFF",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                }}
+              >
+                <Scale size={20} />
+              </div>
+              <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap", marginBottom: "3px" }}>
+                  <span
+                    style={{
+                      fontSize: "0.6875rem",
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.04em",
+                      color: "#0F766E",
+                      background: "rgba(13, 148, 136, 0.12)",
+                      padding: "2px 7px",
+                      borderRadius: "5px",
+                    }}
+                  >
+                    Phase D Spotlight • Board Only
+                  </span>
+                  <span
+                    style={{
+                      fontSize: "0.6875rem",
+                      fontWeight: 700,
+                      color: "#059669",
+                      background: "#ECFDF5",
+                      padding: "2px 7px",
+                      borderRadius: "5px",
+                      border: "1px solid #A7F3D0",
+                    }}
+                  >
+                    Camera Not Required
+                  </span>
+                </div>
+                <h3 style={{ fontSize: "1.0625rem", fontWeight: 700, color: "var(--text-main)", margin: "0 0 2px 0", letterSpacing: "-0.01em" }}>
+                  Directional Weight Shift
+                </h3>
+                <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.4 }}>
+                  Follow sequential on-screen movement instructions (Left, Right, Forward, Backward, Center) by shifting body weight with 2-second hold stability biofeedback.
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => selectExercise("directional-weight-shift")}
+              className="btn-primary"
+              style={{
+                padding: "8px 18px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px",
+                fontSize: "0.8125rem",
+                fontWeight: 700,
+                cursor: "pointer",
+                borderRadius: "8px",
+                flexShrink: 0,
+                whiteSpace: "nowrap",
+                background: "var(--teal-primary)",
+              }}
+            >
+              <Play size={14} fill="#FFFFFF" />
+              <span>Launch Directional Shift</span>
+            </button>
+          </div>
         </div>
 
         {/* Exercise Grid */}

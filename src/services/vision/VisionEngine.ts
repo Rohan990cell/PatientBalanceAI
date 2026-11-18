@@ -17,7 +17,7 @@ import {
   PostureLeanDirection,
 } from "../../types/vision";
 import { BlinkDetector } from "./BlinkDetector";
-import { CameraService, isRealSenseRgbLabel } from "./CameraService";
+import { CameraService, isRealSenseRgbLabel, isLenovoCameraLabel } from "./CameraService";
 
 /**
  * VisionEngine
@@ -65,6 +65,16 @@ export class VisionEngine {
   constructor() {
     this.cameraService = new CameraService();
     this.blinkDetector = new BlinkDetector();
+
+    // Hotplug auto-detection: re-enumerate cameras when hardware changes
+    if (typeof navigator !== "undefined" && navigator.mediaDevices?.addEventListener) {
+      navigator.mediaDevices.addEventListener("devicechange", () => {
+        console.log("[VisionEngine] Hotplug event detected: re-enumerating cameras...");
+        this.enumerateCameras(false).catch((err) => {
+          console.warn("[VisionEngine] Error re-enumerating cameras on devicechange:", err);
+        });
+      });
+    }
   }
 
   /**
@@ -98,16 +108,23 @@ export class VisionEngine {
     const rawDevices = await this.cameraService.getAvailableCameras(requestPermission);
     const mapped: CameraDeviceInfo[] = rawDevices.map((d, index) => {
       const isRealSense = isRealSenseRgbLabel(d.label);
+      const isLenovo = isLenovoCameraLabel(d.label);
+      const sourceType = isRealSense ? ("realsense" as const) : isLenovo ? ("lenovo" as const) : ("other" as const);
       return {
         deviceId: d.deviceId,
-        label: d.label || (isRealSense ? "Intel(R) RealSense(TM) Depth Camera 455f RGB" : `Camera ${index + 1}`),
+        label: d.label || (isRealSense ? "Intel(R) RealSense(TM) Depth Camera 455f RGB" : isLenovo ? "Integrated Camera" : `Camera ${index + 1}`),
         groupId: d.groupId,
         isRealSenseRgb: isRealSense,
+        sourceType,
+        hasRgb: true,
+        hasDepth: isRealSense,
+        status: "connected" as const,
       };
     });
 
     const realSenseDev = mapped.find((d) => d.isRealSenseRgb);
     const isRealSenseAvailable = !!realSenseDev;
+    const hasLenovoDev = mapped.some((d) => d.sourceType === "lenovo");
 
     // Preserve valid selection, prioritize RealSense RGB if no previous user selection,
     // otherwise fallback to first available camera.
@@ -124,6 +141,8 @@ export class VisionEngine {
     this.updateState({
       availableCameras: mapped,
       isRealSenseAvailable,
+      realSenseStatus: isRealSenseAvailable ? "connected" : "disconnected",
+      lenovoStatus: hasLenovoDev ? "connected" : "unavailable",
       selectedCameraId: selectedId,
       activeCameraLabel: this.cameraService.getCurrentDeviceLabel() || currentDev?.label || null,
       activeResolution: this.cameraService.getResolutionString(),
@@ -343,7 +362,7 @@ export class VisionEngine {
    * Requirement 14: If RealSense RGB is unavailable, do NOT silently fall back.
    */
   public async switchCamera(deviceId: string): Promise<boolean> {
-    if (!this.videoElement || !this.canvasElement) {
+    if (!this.videoElement) {
       this.updateState({ selectedCameraId: deviceId });
       return true;
     }
@@ -367,14 +386,17 @@ export class VisionEngine {
       errorMessage: null,
     });
 
-    // Reset MediaPipe timestamp tracker so monotonic sequence starts fresh
+    // Guard against frame processing collisions while switching streams
+    this.isProcessingFrame = true;
     this.lastTimestamp = 0;
 
-    const ok = await this.cameraService.switchCamera(this.videoElement, deviceId);
-    if (!ok) {
+    const switchResult = await this.cameraService.switchCamera(this.videoElement, deviceId);
+    this.isProcessingFrame = false;
+
+    if (!switchResult.success) {
       this.updateState({
-        cameraStatus: "error",
-        errorMessage: "Failed to switch camera stream.",
+        cameraStatus: switchResult.error?.status || "error",
+        errorMessage: switchResult.error?.message || "Failed to switch camera stream.",
       });
       return false;
     }
@@ -403,6 +425,20 @@ export class VisionEngine {
 
   public getIsMirrored(): boolean {
     return this.isMirrored;
+  }
+
+  /**
+   * Get current synchronous vision state (single source of truth)
+   */
+  public getCurrentState(): VisionState {
+    return this.currentState;
+  }
+
+  /**
+   * Get latest normalized pose landmarks & biomechanics
+   */
+  public getLatestPose(): BodyPoseLandmarks | null {
+    return this.currentState.pose;
   }
 
   /**

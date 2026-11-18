@@ -20,7 +20,10 @@
     "test:cop-target": "tsx src/utils/copTargetExercise.test.ts",
     "test:posture-balance": "tsx src/utils/postureBalanceExercise.test.ts",
     "test:posture-alignment": "tsx src/utils/postureAlignmentExercise.test.ts",
-    "test": "tsx scripts/test_smpl_integration.mjs && tsx scripts/test_exercise_engine.mjs && tsx scripts/verify_pose_angles.mjs && tsx scripts/test_multimodal_integration.mjs && tsx src/utils/copMapping.test.ts && tsx src/utils/timeSeries.test.ts && tsx src/utils/sessionRecording.test.ts && tsx src/utils/pdfReport.test.ts && tsx src/utils/multimodalExercise.test.ts && tsx src/utils/copTargetExercise.test.ts && tsx src/utils/postureBalanceExercise.test.ts && tsx src/utils/postureAlignmentExercise.test.ts"
+    "test:directional-weight-shift": "tsx src/utils/directionalWeightShiftExercise.test.ts",
+    "test:multimodal-leg-raise": "tsx src/utils/multimodalLegRaiseExercise.test.ts",
+    "test:camera": "tsx src/services/vision/cameraIntegration.test.ts",
+    "test": "tsx scripts/test_smpl_integration.mjs && tsx scripts/test_exercise_engine.mjs && tsx scripts/verify_pose_angles.mjs && tsx scripts/test_multimodal_integration.mjs && tsx src/utils/copMapping.test.ts && tsx src/utils/timeSeries.test.ts && tsx src/utils/sessionRecording.test.ts && tsx src/utils/pdfReport.test.ts && tsx src/utils/multimodalExercise.test.ts && tsx src/utils/copTargetExercise.test.ts && tsx src/utils/postureBalanceExercise.test.ts && tsx src/utils/postureAlignmentExercise.test.ts && tsx src/utils/directionalWeightShiftExercise.test.ts && tsx src/utils/multimodalLegRaiseExercise.test.ts && tsx src/services/vision/cameraIntegration.test.ts"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.0.1",

@@ -8,6 +8,7 @@ interface MetricTileProps {
   icon: React.ReactNode;
   accentColor?: "cyan" | "emerald" | "amber" | "purple" | "blue";
   statusText?: string;
+  onClick?: () => void;
 }
 
 export const MetricTile: React.FC<MetricTileProps> = ({
@@ -18,64 +19,56 @@ export const MetricTile: React.FC<MetricTileProps> = ({
   icon,
   accentColor = "cyan",
   statusText = "Hardware Idle",
+  onClick,
 }) => {
   const colorMap = {
     cyan: {
-      color: "var(--accent-cyan)",
-      bg: "rgba(6, 182, 212, 0.1)",
-      border: "rgba(6, 182, 212, 0.25)",
+      color: "var(--teal-primary)",
+      bg: "var(--bg-subtle-mint)",
+      border: "var(--border-mint)",
     },
     emerald: {
-      color: "var(--accent-emerald)",
-      bg: "rgba(16, 185, 129, 0.1)",
-      border: "rgba(16, 185, 129, 0.25)",
+      color: "var(--green-primary)",
+      bg: "var(--green-light)",
+      border: "#BBF7D0",
     },
     amber: {
-      color: "var(--accent-amber)",
-      bg: "rgba(245, 158, 11, 0.1)",
-      border: "rgba(245, 158, 11, 0.25)",
+      color: "var(--amber-soft)",
+      bg: "var(--amber-light)",
+      border: "#FDE68A",
     },
     purple: {
-      color: "var(--accent-purple)",
-      bg: "rgba(139, 92, 246, 0.1)",
-      border: "rgba(139, 92, 246, 0.25)",
+      color: "var(--purple-doctor)",
+      bg: "var(--purple-light)",
+      border: "#E9D5FF",
     },
     blue: {
-      color: "var(--accent-blue)",
-      bg: "rgba(59, 130, 246, 0.1)",
-      border: "rgba(59, 130, 246, 0.25)",
+      color: "#2563EB",
+      bg: "#EFF6FF",
+      border: "#BFDBFE",
     },
   };
 
-  const scheme = colorMap[accentColor];
+  const scheme = colorMap[accentColor] || colorMap.cyan;
+  const isAvailable = value !== null && value !== undefined && value !== "";
 
   return (
     <div
-      className="glass-panel"
+      className="medical-card"
+      onClick={onClick}
       style={{
         padding: "20px",
         display: "flex",
         flexDirection: "column",
         justifyContent: "space-between",
         position: "relative",
-        overflow: "hidden",
+        background: "#FFFFFF",
+        border: "1px solid var(--border-light)",
+        borderRadius: "16px",
+        cursor: onClick ? "pointer" : "default",
       }}
     >
-      {/* Ambient background glow accent */}
-      <div
-        style={{
-          position: "absolute",
-          top: "-20px",
-          right: "-20px",
-          width: "90px",
-          height: "90px",
-          borderRadius: "50%",
-          background: scheme.bg,
-          filter: "blur(25px)",
-          pointerEvents: "none",
-        }}
-      />
-
+      {/* Header: Label + Icon */}
       <div
         style={{
           display: "flex",
@@ -86,10 +79,11 @@ export const MetricTile: React.FC<MetricTileProps> = ({
       >
         <span
           style={{
-            fontSize: "0.8125rem",
-            color: "var(--text-secondary)",
-            fontWeight: 500,
-            letterSpacing: "0.01em",
+            fontSize: "0.75rem",
+            color: "var(--text-muted)",
+            fontWeight: 700,
+            textTransform: "uppercase",
+            letterSpacing: "0.04em",
           }}
         >
           {label}
@@ -105,31 +99,36 @@ export const MetricTile: React.FC<MetricTileProps> = ({
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
+            flexShrink: 0,
           }}
         >
           {icon}
         </div>
       </div>
 
-      <div style={{ margin: "6px 0 10px 0" }}>
+      {/* Metric Value */}
+      <div style={{ margin: "4px 0 12px 0" }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: "6px" }}>
           <span
             style={{
-              fontFamily: "var(--font-heading)",
+              fontFamily: "var(--font-sans)",
               fontSize: "2rem",
-              fontWeight: 700,
-              color: value !== null ? "var(--text-primary)" : "var(--text-muted)",
-              letterSpacing: "-0.03em",
+              fontWeight: 800,
+              color: isAvailable ? "var(--text-main)" : "var(--text-light)",
+              letterSpacing: "-0.02em",
+              fontVariantNumeric: "tabular-nums",
+              minWidth: "4ch",
+              display: "inline-block",
             }}
           >
-            {value !== null ? value : "--"}
+            {isAvailable ? value : "--"}
           </span>
           {unit && (
             <span
               style={{
-                fontSize: "0.875rem",
+                fontSize: "0.9375rem",
                 color: "var(--text-muted)",
-                fontWeight: 500,
+                fontWeight: 600,
               }}
             >
               {unit}
@@ -139,9 +138,10 @@ export const MetricTile: React.FC<MetricTileProps> = ({
         {subtext && (
           <p
             style={{
-              fontSize: "0.75rem",
+              fontSize: "0.8125rem",
               color: "var(--text-muted)",
               marginTop: "4px",
+              lineHeight: 1.4,
             }}
           >
             {subtext}
@@ -149,19 +149,28 @@ export const MetricTile: React.FC<MetricTileProps> = ({
         )}
       </div>
 
+      {/* Footer / Status Indicator */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          paddingTop: "10px",
-          borderTop: "1px solid var(--border-subtle)",
-          fontSize: "0.7rem",
+          paddingTop: "12px",
+          borderTop: "1px solid var(--border-light)",
+          fontSize: "0.75rem",
           color: "var(--text-muted)",
         }}
       >
-        <span>Status</span>
-        <span style={{ color: scheme.color, fontWeight: 500 }}>{statusText}</span>
+        <span style={{ fontWeight: 500 }}>Status</span>
+        <span
+          style={{
+            color: scheme.color,
+            fontWeight: 700,
+            fontSize: "0.75rem",
+          }}
+        >
+          {statusText}
+        </span>
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useMemo, useCallback } from "react";
 import { AppShell } from "./components/layout/AppShell";
-import { HomePage } from "./pages/HomePage";
+import { DashboardPage } from "./pages/DashboardPage";
 import { ExercisesPage } from "./pages/ExercisesPage";
 import { VisionPage } from "./pages/VisionPage";
 import { ProgressPage } from "./pages/ProgressPage";
@@ -19,14 +19,15 @@ import { ExerciseProvider } from "./context/ExerciseContext";
 const AppContent: React.FC = () => {
   const [currentTab, setCurrentTab] = useState<NavigationTab>("home");
   const [mode, setMode] = useState<ApplicationMode>("patient");
-  const { status, reading } = useBalanceBoard();
+  const [isResultFullScreen, setIsResultFullScreen] = useState(false);
+  const { status } = useBalanceBoard();
   const { isCameraActive } = useVision();
 
   // Default patient profile for rehabilitation
-  const activePatient: PatientProfile = {
+  const activePatient: PatientProfile = useMemo(() => ({
     id: "pat-001",
     medicalRecordNumber: "MRN-2026-0841",
-    fullName: "Eleanor Vance",
+    fullName: "Rohan",
     age: 58,
     gender: "Female",
     heightCm: 165,
@@ -35,30 +36,56 @@ const AppContent: React.FC = () => {
     rehabilitationGoal: "Romberg Equilibrium & Unassisted Stance",
     assignedDoctor: "Dr. Rachel Sullivan, MD",
     lastSessionDate: "2026-09-26",
-  };
+  }), []);
 
-  const handleToggleMode = (newMode: ApplicationMode) => {
+  const handleToggleMode = useCallback((newMode: ApplicationMode) => {
     setMode(newMode);
     if (newMode === "doctor") {
       setCurrentTab("doctor-dashboard");
     } else {
       setCurrentTab("home");
     }
-  };
+  }, []);
+
+  const goToExercises = useCallback(() => {
+    setIsResultFullScreen(false);
+    setCurrentTab("exercises");
+  }, []);
+  const goToSettings = useCallback(() => {
+    setIsResultFullScreen(false);
+    setCurrentTab("settings");
+  }, []);
+  const goToDevices = useCallback(() => {
+    setIsResultFullScreen(false);
+    setCurrentTab("devices");
+  }, []);
+  const goToBalance = useCallback(() => {
+    setIsResultFullScreen(false);
+    setCurrentTab("balance");
+  }, []);
+  const goToHome = useCallback(() => {
+    setIsResultFullScreen(false);
+    setCurrentTab("home");
+  }, []);
+
+  const handleSelectTab = useCallback((tab: NavigationTab) => {
+    setIsResultFullScreen(false);
+    setCurrentTab(tab);
+  }, []);
 
   const renderActivePage = () => {
     switch (currentTab) {
       case "home":
         return (
-          <HomePage
+          <DashboardPage
             patient={activePatient}
             boardConnected={status.isConnected}
-            liveWeight={reading?.totalWeight}
-            onStartSession={() => setCurrentTab("exercises")}
-            onNavigateToExercises={() => setCurrentTab("exercises")}
-            onNavigateToSettings={() => setCurrentTab("settings")}
-            onNavigateToDevices={() => setCurrentTab("devices")}
-            onNavigateToBalance={() => setCurrentTab("balance")}
+            onNavigateToDevices={goToDevices}
+            onNavigateToExercises={goToExercises}
+            onNavigateToProfile={() => setCurrentTab("profile")}
+            onNavigateToBalance={goToBalance}
+            onNavigateToReports={() => setCurrentTab("reports")}
+            onNavigateToSettings={goToSettings}
           />
         );
       case "balance":
@@ -68,7 +95,14 @@ const AppContent: React.FC = () => {
       case "doctor-vision":
         return <VisionPage />;
       case "exercises":
-        return <ExercisesPage patient={activePatient} onBack={() => setCurrentTab("home")} />;
+        return (
+          <ExercisesPage
+            patient={activePatient}
+            onBack={goToHome}
+            onResultFullScreenChange={setIsResultFullScreen}
+            onNavigateToDashboard={goToHome}
+          />
+        );
       case "progress":
       case "doctor-analytics":
         return <ProgressPage />;
@@ -89,27 +123,31 @@ const AppContent: React.FC = () => {
         return <SettingsPage />;
       default:
         return (
-          <HomePage
+          <DashboardPage
             patient={activePatient}
             boardConnected={status.isConnected}
-            liveWeight={reading?.totalWeight}
-            onStartSession={() => setCurrentTab("exercises")}
-            onNavigateToExercises={() => setCurrentTab("exercises")}
-            onNavigateToSettings={() => setCurrentTab("settings")}
-            onNavigateToDevices={() => setCurrentTab("devices")}
+            onNavigateToDevices={goToDevices}
+            onNavigateToExercises={goToExercises}
+            onNavigateToProfile={() => setCurrentTab("profile")}
+            onNavigateToBalance={goToBalance}
+            onNavigateToReports={() => setCurrentTab("reports")}
+            onNavigateToSettings={goToSettings}
           />
         );
     }
   };
 
+  const shouldHideSidebar = isResultFullScreen && currentTab === "exercises";
+
   return (
     <AppShell
       currentTab={currentTab}
-      onSelectTab={(tab) => setCurrentTab(tab)}
+      onSelectTab={handleSelectTab}
       mode={mode}
       onToggleMode={handleToggleMode}
       boardConnected={status.isConnected}
       webcamActive={isCameraActive}
+      hideSidebar={shouldHideSidebar}
     >
       {renderActivePage()}
     </AppShell>

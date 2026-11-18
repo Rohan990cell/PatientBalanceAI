@@ -1,12 +1,22 @@
 import React, { useState } from "react";
-import { Bluetooth, Camera, RefreshCw, CheckCircle2, Shield, Cpu, Scale, AlertCircle, Compass } from "lucide-react";
+import { Bluetooth, Camera, RefreshCw, Shield, Cpu, Scale, AlertCircle, Compass } from "lucide-react";
 import { Card } from "../components/common/Card";
 import { StatusBadge } from "../components/common/StatusBadge";
 import { useBalanceBoard } from "../context/HardwareContext";
+import { useVision } from "../context/VisionContext";
+import { isLenovoCameraLabel } from "../services/vision/CameraService";
 
 export const DevicesPage: React.FC = () => {
   const { status, reading, scanAndConnect, directHidConnect, disconnect, tare, isTauri } = useBalanceBoard();
-  const [webcamTested, setWebcamTested] = useState(false);
+  const {
+    visionState,
+    isCameraActive,
+    startCamera,
+    stopCamera,
+    switchCamera,
+    enumerateCameras,
+  } = useVision();
+  const [isRefreshingCameras, setIsRefreshingCameras] = useState(false);
 
   return (
     <div
@@ -194,7 +204,7 @@ export const DevicesPage: React.FC = () => {
                 <span style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase" }}>
                   Total Weight
                 </span>
-                <span style={{ fontSize: "1.75rem", fontWeight: 800, color: "var(--teal-primary)", marginTop: "4px" }}>
+                <span style={{ fontSize: "1.75rem", fontWeight: 800, color: "var(--teal-primary)", marginTop: "4px", fontVariantNumeric: "tabular-nums", minWidth: "6ch", textAlign: "center" }}>
                   {reading ? `${reading.totalWeight.toFixed(1)} kg` : "--"}
                 </span>
               </div>
@@ -215,11 +225,11 @@ export const DevicesPage: React.FC = () => {
                 <span style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase" }}>
                   Lateral Balance (L / R)
                 </span>
-                <div style={{ display: "flex", gap: "12px", alignItems: "baseline", marginTop: "4px" }}>
-                  <span style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--text-main)" }}>
+                <div style={{ display: "flex", gap: "12px", alignItems: "baseline", marginTop: "4px", fontVariantNumeric: "tabular-nums" }}>
+                  <span style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--text-main)", minWidth: "12ch", display: "inline-block" }}>
                     L: {reading ? `${reading.leftWeight.toFixed(1)} kg (${reading.leftPercent.toFixed(1)}%)` : "--"}
                   </span>
-                  <span style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--text-main)" }}>
+                  <span style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--text-main)", minWidth: "12ch", display: "inline-block" }}>
                     R: {reading ? `${reading.rightWeight.toFixed(1)} kg (${reading.rightPercent.toFixed(1)}%)` : "--"}
                   </span>
                 </div>
@@ -241,11 +251,11 @@ export const DevicesPage: React.FC = () => {
                 <span style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase" }}>
                   Anteroposterior (Ant / Post)
                 </span>
-                <div style={{ display: "flex", gap: "12px", alignItems: "baseline", marginTop: "4px" }}>
-                  <span style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--text-main)" }}>
+                <div style={{ display: "flex", gap: "12px", alignItems: "baseline", marginTop: "4px", fontVariantNumeric: "tabular-nums" }}>
+                  <span style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--text-main)", minWidth: "13ch", display: "inline-block" }}>
                     Ant: {reading ? `${reading.anteriorWeight.toFixed(1)} kg (${reading.anteriorPercent.toFixed(1)}%)` : "--"}
                   </span>
-                  <span style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--text-main)" }}>
+                  <span style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--text-main)", minWidth: "13ch", display: "inline-block" }}>
                     Post: {reading ? `${reading.posteriorWeight.toFixed(1)} kg (${reading.posteriorPercent.toFixed(1)}%)` : "--"}
                   </span>
                 </div>
@@ -275,16 +285,16 @@ export const DevicesPage: React.FC = () => {
                     [-1 to +1]
                   </span>
                 </div>
-                <div style={{ display: "flex", gap: "16px", marginTop: "8px" }}>
+                <div style={{ display: "flex", gap: "16px", marginTop: "8px", fontVariantNumeric: "tabular-nums" }}>
                   <div>
                     <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>X (Lateral: Left -X / Right +X): </span>
-                    <span style={{ fontSize: "1.0625rem", fontWeight: 700, color: "var(--text-main)" }}>
+                    <span style={{ fontSize: "1.0625rem", fontWeight: 700, color: "var(--text-main)", minWidth: "12ch", display: "inline-block" }}>
                       {reading ? `${reading.copX >= 0 ? "+" : ""}${reading.copX.toFixed(2)} (${reading.copXMm >= 0 ? "+" : ""}${reading.copXMm.toFixed(1)} mm)` : "--"}
                     </span>
                   </div>
                   <div>
                     <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Y (Anteroposterior: Back -Y / Front +Y): </span>
-                    <span style={{ fontSize: "1.0625rem", fontWeight: 700, color: "var(--text-main)" }}>
+                    <span style={{ fontSize: "1.0625rem", fontWeight: 700, color: "var(--text-main)", minWidth: "12ch", display: "inline-block" }}>
                       {reading ? `${reading.copY >= 0 ? "+" : ""}${reading.copY.toFixed(2)} (${reading.copYMm >= 0 ? "+" : ""}${reading.copYMm.toFixed(1)} mm)` : "--"}
                     </span>
                   </div>
@@ -376,53 +386,244 @@ export const DevicesPage: React.FC = () => {
         </div>
       </Card>
 
-      {/* Secondary Hardware Card: Webcam (Phase 1 placeholder preserved) */}
+      {/* Secondary Hardware Card: Camera & Vision Hardware */}
       <Card
-        title="Webcam Vision"
-        subtitle="Camera for eye, blink, and body tracking (Phase 3)"
+        title="Camera & Vision Hardware"
+        subtitle="Lenovo Webcam & Intel RealSense D455f Dual-Camera System"
         icon={<Camera size={20} />}
         headerAction={
           <StatusBadge
-            status={webcamTested ? "ready" : "standby"}
-            label={webcamTested ? "Verified" : "Standby"}
+            status={isCameraActive ? "connected" : visionState.cameraStatus === "starting" ? "scanning" : "ready"}
+            label={isCameraActive ? "Active Feed" : "Ready"}
           />
         }
       >
-        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: "12px",
-              padding: "14px",
-              borderRadius: "10px",
-              background: "var(--bg-app)",
-              fontSize: "0.8125rem",
-            }}
-          >
-            <div>
-              <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>Vision Model</span>
-              <div style={{ fontWeight: 600, color: "var(--text-main)", marginTop: "2px" }}>
-                MediaPipe Vision (Pending Phase 3)
+        <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+          {/* Dual Camera Ground Truth Inventory */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px" }}>
+            {/* Lenovo Webcam Ground Truth Card */}
+            <div
+              style={{
+                padding: "16px",
+                borderRadius: "10px",
+                background: "var(--bg-app)",
+                border: "1px solid var(--border-light)",
+                display: "flex",
+                flexDirection: "column",
+                gap: "10px",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <div
+                    style={{
+                      width: "8px",
+                      height: "8px",
+                      borderRadius: "50%",
+                      background: "var(--green-primary)",
+                    }}
+                  />
+                  <span style={{ fontWeight: 700, fontSize: "0.875rem", color: "var(--text-main)" }}>
+                    Lenovo Integrated Camera
+                  </span>
+                </div>
+                <span
+                  style={{
+                    fontSize: "0.6875rem",
+                    fontWeight: 700,
+                    color: "var(--green-primary)",
+                    background: "var(--bg-subtle-mint)",
+                    padding: "2px 8px",
+                    borderRadius: "6px",
+                  }}
+                >
+                  Started / Online
+                </span>
+              </div>
+
+              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", display: "flex", flexDirection: "column", gap: "4px" }}>
+                <div><strong>Hardware ID:</strong> <code>USB\VID_5986&PID_216A</code> (SunplusIT)</div>
+                <div><strong>Capabilities:</strong> 2D RGB Stream • MediaPipe 33-Joint Pose</div>
+                <div><strong>Status:</strong> {visionState.activeCameraLabel && isLenovoCameraLabel(visionState.activeCameraLabel) ? "Active Video Source" : "Standby / Available"}</div>
               </div>
             </div>
 
-            <div>
-              <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>Resolution</span>
-              <div style={{ fontFamily: "var(--font-mono)", color: "var(--text-main)", marginTop: "2px" }}>
-                720p @ 30 FPS
+            {/* Intel RealSense D455f Ground Truth Card */}
+            <div
+              style={{
+                padding: "16px",
+                borderRadius: "10px",
+                background: visionState.isRealSenseAvailable ? "var(--bg-subtle-mint)" : "#FFFBEB",
+                border: `1px solid ${visionState.isRealSenseAvailable ? "var(--border-mint)" : "#FDE68A"}`,
+                display: "flex",
+                flexDirection: "column",
+                gap: "10px",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <div
+                    style={{
+                      width: "8px",
+                      height: "8px",
+                      borderRadius: "50%",
+                      background: visionState.isRealSenseAvailable ? "var(--green-primary)" : "#D97706",
+                    }}
+                  />
+                  <span style={{ fontWeight: 700, fontSize: "0.875rem", color: "var(--text-main)" }}>
+                    Intel RealSense D455f
+                  </span>
+                </div>
+                <span
+                  style={{
+                    fontSize: "0.6875rem",
+                    fontWeight: 700,
+                    color: visionState.isRealSenseAvailable ? "var(--green-primary)" : "#B45309",
+                    background: visionState.isRealSenseAvailable ? "var(--bg-subtle-mint)" : "#FEF3C7",
+                    padding: "2px 8px",
+                    borderRadius: "6px",
+                  }}
+                >
+                  {visionState.isRealSenseAvailable ? "Connected" : "Disconnected (USB)"}
+                </span>
+              </div>
+
+              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", display: "flex", flexDirection: "column", gap: "4px" }}>
+                <div><strong>Serial Number:</strong> <code>250343060869</code> (Known PnP Device)</div>
+                <div><strong>Hardware ID:</strong> <code>USB\VID_8086&PID_0B5C</code> (Depth MI_00, RGB MI_03)</div>
+                <div>
+                  <strong>RGB Sensor:</strong>{" "}
+                  {visionState.isRealSenseAvailable ? (
+                    <span style={{ color: "var(--green-primary)", fontWeight: 700 }}>Available</span>
+                  ) : (
+                    <span style={{ color: "#B45309" }}>Disconnected</span>
+                  )}
+                  {" • "}
+                  <strong>Depth:</strong>{" "}
+                  <span style={{ color: "var(--text-muted)" }}>
+                    {visionState.isRealSenseAvailable ? "Native Stream (Z16)" : "Disconnected"}
+                  </span>
+                </div>
+                {!visionState.isRealSenseAvailable && (
+                  <div style={{ color: "#92400E", fontSize: "0.6875rem", marginTop: "2px" }}>
+                    &bull; Plug Intel RealSense D455f into a high-speed USB 3.0 port to enable.
+                  </div>
+                )}
               </div>
             </div>
           </div>
 
-          <button
-            onClick={() => setWebcamTested(true)}
-            className="btn-secondary"
-            style={{ width: "fit-content" }}
+          {/* Active Camera Selection & Stream Diagnostics */}
+          <div
+            style={{
+              padding: "14px 18px",
+              borderRadius: "10px",
+              background: "#F8FAFC",
+              border: "1px solid var(--border-light)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: "12px",
+            }}
           >
-            <CheckCircle2 size={16} />
-            <span>Test Camera Detection</span>
-          </button>
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              <span style={{ fontSize: "0.8125rem", fontWeight: 700, color: "var(--text-muted)" }}>
+                Selected Video Input:
+              </span>
+              <select
+                value={visionState.selectedCameraId || (visionState.availableCameras[0]?.deviceId ?? "")}
+                onChange={async (e) => {
+                  const devId = e.target.value;
+                  if (devId === "realsense-disconnected") {
+                    alert("Intel RealSense D455f is physically disconnected. Please connect the USB 3.0 cable.");
+                    return;
+                  }
+                  await switchCamera(devId);
+                }}
+                style={{
+                  fontSize: "0.8125rem",
+                  fontWeight: 600,
+                  padding: "6px 12px",
+                  borderRadius: "8px",
+                  border: "1px solid var(--border-light)",
+                  background: "#FFFFFF",
+                  color: "var(--text-main)",
+                  cursor: "pointer",
+                }}
+              >
+                {visionState.availableCameras.map((cam) => (
+                  <option key={cam.deviceId} value={cam.deviceId}>
+                    {cam.isRealSenseRgb
+                      ? "Intel RealSense D455f (RGB Active)"
+                      : isLenovoCameraLabel(cam.label)
+                      ? "Lenovo Integrated Camera"
+                      : cam.label || "Webcam"}
+                  </option>
+                ))}
+                {!visionState.isRealSenseAvailable && (
+                  <option value="realsense-disconnected">
+                    Intel RealSense D455f (Disconnected)
+                  </option>
+                )}
+              </select>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "16px", fontSize: "0.75rem" }}>
+              <div>
+                <span style={{ color: "var(--text-muted)" }}>Active Resolution: </span>
+                <span style={{ fontWeight: 700, fontFamily: "var(--font-mono)" }}>
+                  {visionState.activeResolution}
+                </span>
+              </div>
+              <div>
+                <span style={{ color: "var(--text-muted)" }}>MediaPipe Pose: </span>
+                <span style={{ fontWeight: 700, color: visionState.hasPose ? "var(--green-primary)" : "var(--text-muted)" }}>
+                  {visionState.hasPose ? "Tracking (33 Joints)" : visionState.modelsLoaded ? "Ready" : "Standby"}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          <div style={{ display: "flex", gap: "12px", paddingTop: "6px" }}>
+            {!isCameraActive ? (
+              <button
+                onClick={() => startCamera()}
+                className="btn-primary"
+                style={{ flex: 1 }}
+              >
+                <Camera size={16} />
+                <span>Start Camera Stream &amp; Vision Engine</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => stopCamera()}
+                className="btn-secondary"
+                style={{ flex: 1 }}
+              >
+                <Camera size={16} />
+                <span>Stop Camera Stream</span>
+              </button>
+            )}
+
+            <button
+              onClick={async () => {
+                setIsRefreshingCameras(true);
+                try {
+                  await enumerateCameras(true);
+                } finally {
+                  setIsRefreshingCameras(false);
+                }
+              }}
+              disabled={isRefreshingCameras}
+              className="btn-secondary"
+              style={{ display: "flex", alignItems: "center", gap: "8px" }}
+            >
+              <RefreshCw size={15} className={isRefreshingCameras ? "spin" : ""} />
+              <span>{isRefreshingCameras ? "Refreshing..." : "Rescan Cameras"}</span>
+            </button>
+          </div>
         </div>
       </Card>
 

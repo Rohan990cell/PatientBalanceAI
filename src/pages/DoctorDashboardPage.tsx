@@ -1,14 +1,16 @@
+
 import React, { useState } from "react";
-import { Users, TrendingUp, AlertTriangle, Download } from "lucide-react";
+import { Users, TrendingUp, AlertTriangle, Download, CheckCircle2 } from "lucide-react";
 import { Card } from "../components/common/Card";
 
 export const DoctorDashboardPage: React.FC = () => {
   const [selectedPatientId, setSelectedPatientId] = useState<string>("P001");
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
 
   const patients = [
     {
       id: "P001",
-      name: "Eleanor Vance",
+      name: "Rohan",
       age: 58,
       mrn: "MRN-2026-0841",
       diagnosis: "Vestibular Neuritis",
@@ -43,6 +45,23 @@ export const DoctorDashboardPage: React.FC = () => {
       alert: null,
     },
   ];
+
+  const handleExportCohort = () => {
+    try {
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(patients, null, 2));
+      const downloadAnchor = document.createElement("a");
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", `PatientBalanceAI_Cohort_${new Date().toISOString().split("T")[0]}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+
+      setExportNotice("Cohort data successfully exported.");
+      setTimeout(() => setExportNotice(null), 4000);
+    } catch (err: unknown) {
+      setExportNotice(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
 
   const selectedPatient = patients.find((p) => p.id === selectedPatientId) || patients[0];
 
@@ -91,8 +110,18 @@ export const DoctorDashboardPage: React.FC = () => {
           </p>
         </div>
 
-        <div style={{ display: "flex", gap: "10px" }}>
-          <button className="btn-secondary" style={{ fontSize: "0.8125rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          {exportNotice && (
+            <span style={{ fontSize: "0.8125rem", color: "#059669", fontWeight: 600, display: "flex", alignItems: "center", gap: "4px" }}>
+              <CheckCircle2 size={14} />
+              {exportNotice}
+            </span>
+          )}
+          <button
+            onClick={handleExportCohort}
+            className="btn-secondary"
+            style={{ fontSize: "0.8125rem" }}
+          >
             <Download size={15} />
             <span>Export Cohort Data</span>
           </button>

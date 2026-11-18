@@ -14,6 +14,10 @@ export interface CameraDeviceInfo {
   label: string;
   groupId: string;
   isRealSenseRgb?: boolean;
+  sourceType?: "lenovo" | "realsense" | "other";
+  hasRgb?: boolean;
+  hasDepth?: boolean;
+  status?: "connected" | "disconnected" | "unavailable";
 }
 
 export interface NormalizedLandmark {
@@ -130,6 +134,8 @@ export interface VisionState {
   activeCameraLabel: string | null;
   activeResolution: string;
   isRealSenseAvailable: boolean;
+  realSenseStatus?: "connected" | "disconnected" | "unavailable";
+  lenovoStatus?: "connected" | "disconnected" | "unavailable";
   isMirrored: boolean;
 
   // Pose
@@ -154,6 +160,8 @@ export const INITIAL_VISION_STATE: VisionState = {
   activeCameraLabel: null,
   activeResolution: "--",
   isRealSenseAvailable: false,
+  realSenseStatus: "disconnected",
+  lenovoStatus: "unavailable",
   isMirrored: true,
   hasPose: false,
   pose: null,

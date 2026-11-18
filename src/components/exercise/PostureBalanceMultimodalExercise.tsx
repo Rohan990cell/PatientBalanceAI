@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useBalanceBoard } from "../../context/HardwareContext";
 import { useVision } from "../../context/VisionContext";
+import { isLenovoCameraLabel } from "../../services/vision/CameraService";
 import { mapCopToBoard } from "../../utils/copMapping";
 import {
   SKELETON_2D_KEY_JOINTS,
@@ -52,6 +53,7 @@ export const PostureBalanceMultimodalExercise: React.FC<PostureBalanceMultimodal
     visionState,
     isCameraActive,
     startCamera,
+    switchCamera,
     getMediaStream,
     isMirrored,
   } = useVision();
@@ -135,15 +137,6 @@ export const PostureBalanceMultimodalExercise: React.FC<PostureBalanceMultimodal
     return "Data Source: --";
   }, [hardwareStatus.isConnected, isSimulated]);
 
-  // Preferred Camera Label (RealSense vs Default)
-  const cameraDeviceName = useMemo(() => {
-    if (!isCameraActive) return "Camera: Off";
-    if (visionState.isRealSenseAvailable || visionState.activeCameraLabel?.toLowerCase().includes("realsense")) {
-      return `Intel RealSense RGB (${visionState.activeCameraLabel || "Connected"})`;
-    }
-    return visionState.activeCameraLabel || "Active Camera Feed";
-  }, [isCameraActive, visionState.isRealSenseAvailable, visionState.activeCameraLabel]);
-
   // =========================================================================
   // CAMERA LIFECYCLE (TASK 8)
   // Connects to existing media stream without stopping or creating duplicate streams
@@ -158,7 +151,7 @@ export const PostureBalanceMultimodalExercise: React.FC<PostureBalanceMultimodal
         console.warn("[PostureBalanceExercise] videoElement.play() warning:", err);
       });
     }
-  }, [phase, isCameraActive, getMediaStream]);
+  }, [phase, isCameraActive, getMediaStream, visionState.selectedCameraId, visionState.activeCameraLabel]);
 
   // =========================================================================
   // TASK 2: 2D SKELETON CANVAS OVERLAY RENDER LOOP
@@ -294,6 +287,31 @@ export const PostureBalanceMultimodalExercise: React.FC<PostureBalanceMultimodal
   // =========================================================================
   // EXERCISE TIMER & ACTIVE METRIC COLLECTION (TASK 9)
   // =========================================================================
+  const elapsedMsRef = useRef<number>(0);
+
+  // Complete Exercise Handler
+  const handleCompleteExercise = useCallback((finalDurationMs?: number) => {
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
+    }
+    setPhase("COMPLETED");
+
+    const duration = typeof finalDurationMs === "number" ? finalDurationMs : elapsedMsRef.current;
+    setElapsedMs(duration);
+
+    const result = calculatePostureBalanceResult({
+      durationMs: duration,
+      postureSamplesCount: postureSamplesCountRef.current,
+      balanceSamplesCount: balanceSamplesCountRef.current,
+      alignedSamplesCount: alignedSamplesCountRef.current,
+      isSimulated: isSimulated && !hardwareStatus.isConnected,
+      isConnected: hardwareStatus.isConnected,
+    });
+
+    setExerciseResult(result);
+  }, [isSimulated, hardwareStatus.isConnected]);
+
   useEffect(() => {
     if (phase !== "ACTIVE") {
       if (timerIntervalRef.current) {
@@ -303,16 +321,18 @@ export const PostureBalanceMultimodalExercise: React.FC<PostureBalanceMultimodal
       return;
     }
 
-    sessionStartTimeRef.current = performance.now() - elapsedMs;
+    sessionStartTimeRef.current = performance.now();
+    elapsedMsRef.current = 0;
 
     timerIntervalRef.current = setInterval(() => {
       if (sessionStartTimeRef.current !== null) {
         const curElapsed = performance.now() - sessionStartTimeRef.current;
+        elapsedMsRef.current = curElapsed;
         setElapsedMs(curElapsed);
 
         // Auto-complete when target duration is reached
         if (curElapsed >= targetDurationSeconds * 1000) {
-          handleCompleteExercise();
+          handleCompleteExercise(curElapsed);
         }
       }
     }, 100);
@@ -320,9 +340,10 @@ export const PostureBalanceMultimodalExercise: React.FC<PostureBalanceMultimodal
     return () => {
       if (timerIntervalRef.current) {
         clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
       }
     };
-  }, [phase, elapsedMs]);
+  }, [phase, handleCompleteExercise]);
 
   // Ingest continuous samples for multimodal compliance evaluation
   useEffect(() => {
@@ -369,22 +390,6 @@ export const PostureBalanceMultimodalExercise: React.FC<PostureBalanceMultimodal
       }
     }, 1000);
   }, [isCameraActive, startCamera]);
-
-  // Complete Exercise Handler
-  const handleCompleteExercise = useCallback(() => {
-    setPhase("COMPLETED");
-
-    const result = calculatePostureBalanceResult({
-      durationMs: elapsedMs,
-      postureSamplesCount: postureSamplesCountRef.current,
-      balanceSamplesCount: balanceSamplesCountRef.current,
-      alignedSamplesCount: alignedSamplesCountRef.current,
-      isSimulated: isSimulated && !hardwareStatus.isConnected,
-      isConnected: hardwareStatus.isConnected,
-    });
-
-    setExerciseResult(result);
-  }, [elapsedMs, isSimulated, hardwareStatus.isConnected]);
 
   // Reset Exercise Handler
   const handleRestart = useCallback(() => {
@@ -504,10 +509,46 @@ export const PostureBalanceMultimodalExercise: React.FC<PostureBalanceMultimodal
               </div>
               <div>
                 <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-muted)" }}>
-                  Optical Sensor Feed
+                  Optical Sensor Feed (Camera Selection)
                 </div>
-                <div style={{ fontSize: "0.875rem", fontWeight: 800, color: "var(--text-main)" }}>
-                  {cameraDeviceName}
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "2px" }}>
+                  <select
+                    value={visionState.selectedCameraId || (visionState.availableCameras[0]?.deviceId ?? "")}
+                    onChange={async (e) => {
+                      const devId = e.target.value;
+                      if (devId === "realsense-disconnected") {
+                        alert("Intel RealSense D455f is physically disconnected. Please connect it to a high-speed USB 3.0 port.");
+                        return;
+                      }
+                      await switchCamera(devId);
+                    }}
+                    style={{
+                      fontSize: "0.8125rem",
+                      fontWeight: 700,
+                      padding: "4px 8px",
+                      borderRadius: "6px",
+                      border: "1px solid var(--border-light)",
+                      background: "#FFFFFF",
+                      color: "var(--text-main)",
+                      cursor: "pointer",
+                      maxWidth: "240px",
+                    }}
+                  >
+                    {visionState.availableCameras.map((cam) => (
+                      <option key={cam.deviceId} value={cam.deviceId}>
+                        {cam.isRealSenseRgb
+                          ? "Intel RealSense D455f (RGB Active)"
+                          : isLenovoCameraLabel(cam.label)
+                          ? "Lenovo Integrated Camera"
+                          : cam.label || "Webcam"}
+                      </option>
+                    ))}
+                    {!visionState.isRealSenseAvailable && (
+                      <option value="realsense-disconnected">
+                        Intel RealSense D455f (Disconnected)
+                      </option>
+                    )}
+                  </select>
                 </div>
               </div>
             </div>
@@ -520,9 +561,14 @@ export const PostureBalanceMultimodalExercise: React.FC<PostureBalanceMultimodal
                 Enable Camera
               </button>
             ) : (
-              <span style={{ fontSize: "0.75rem", color: "var(--green-primary)", fontWeight: 700 }}>
-                ✓ Ready
-              </span>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "2px" }}>
+                <span style={{ fontSize: "0.75rem", color: "var(--green-primary)", fontWeight: 700 }}>
+                  ✓ Ready
+                </span>
+                <span style={{ fontSize: "0.6875rem", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                  {visionState.activeResolution}
+                </span>
+              </div>
             )}
           </div>
 
@@ -744,13 +790,87 @@ export const PostureBalanceMultimodalExercise: React.FC<PostureBalanceMultimodal
             gap: "12px",
           }}
         >
-          <div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
             <div style={{ fontSize: "0.75rem", fontWeight: 800, textTransform: "uppercase", color: "var(--teal-primary)" }}>
               Phase B Wednesday Demo &bull; Posture + Balance Multimodal Stance
             </div>
-            <h2 style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--text-main)", margin: "2px 0 0 0" }}>
-              {isCountdown ? "Get Ready" : "Active Multimodal Posture & Balance"}
-            </h2>
+            <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+              <h2 style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--text-main)", margin: 0 }}>
+                {isCountdown ? "Get Ready" : "Active Multimodal Posture & Balance"}
+              </h2>
+
+              {/* Compact Camera Selector */}
+              <div
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  background: "#F8FAFC",
+                  padding: "4px 8px",
+                  borderRadius: "8px",
+                  border: "1px solid var(--border-light)",
+                }}
+              >
+                <Camera size={14} color="var(--teal-primary)" />
+                <select
+                  value={visionState.selectedCameraId || (visionState.availableCameras[0]?.deviceId ?? "")}
+                  onChange={async (e) => {
+                    const devId = e.target.value;
+                    if (devId === "realsense-disconnected") {
+                      alert("Intel RealSense D455f is physically disconnected. Please connect it to a high-speed USB 3.0 port.");
+                      return;
+                    }
+                    await switchCamera(devId);
+                  }}
+                  disabled={visionState.cameraStatus === "starting"}
+                  style={{
+                    fontSize: "0.75rem",
+                    fontWeight: 600,
+                    padding: "2px 4px",
+                    borderRadius: "4px",
+                    border: "none",
+                    background: "transparent",
+                    color: "var(--text-main)",
+                    cursor: "pointer",
+                    outline: "none",
+                    maxWidth: "220px",
+                  }}
+                >
+                  {visionState.availableCameras.map((cam) => (
+                    <option key={cam.deviceId} value={cam.deviceId}>
+                      {cam.isRealSenseRgb
+                        ? "Intel RealSense D455f (RGB)"
+                        : isLenovoCameraLabel(cam.label)
+                        ? "Lenovo Integrated Camera"
+                        : cam.label || "Webcam"}
+                    </option>
+                  ))}
+                  {!visionState.isRealSenseAvailable && (
+                    <option value="realsense-disconnected">
+                      Intel RealSense D455f (Disconnected)
+                    </option>
+                  )}
+                </select>
+                <span
+                  style={{
+                    fontSize: "0.6875rem",
+                    fontWeight: 700,
+                    padding: "2px 6px",
+                    borderRadius: "4px",
+                    color: visionState.activeCameraLabel?.toLowerCase().includes("realsense")
+                      ? "var(--teal-primary)"
+                      : "#475569",
+                    background: visionState.activeCameraLabel?.toLowerCase().includes("realsense")
+                      ? "var(--bg-subtle-mint)"
+                      : "#EDE9FE",
+                  }}
+                >
+                  {visionState.activeCameraLabel?.toLowerCase().includes("realsense")
+                    ? "RealSense RGB • Depth: Native"
+                    : "Lenovo Webcam"}
+                </span>
+              </div>
+            </div>
           </div>
 
           {/* Timer & Sensor Indicators */}
@@ -1237,7 +1357,7 @@ export const PostureBalanceMultimodalExercise: React.FC<PostureBalanceMultimodal
           </button>
 
           <button
-            onClick={handleCompleteExercise}
+            onClick={() => handleCompleteExercise()}
             className="btn-secondary"
             style={{ fontSize: "0.875rem", padding: "8px 16px" }}
           >

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useState } from "react";
 import { Bluetooth, Scale, Info, AlertCircle, Compass, LineChart, Box } from "lucide-react";
 import { Card } from "../components/common/Card";
 import { StatusBadge } from "../components/common/StatusBadge";
@@ -7,7 +7,6 @@ import { VisualBalanceBoard } from "../components/balance/VisualBalanceBoard";
 import { BalanceMetricTiles } from "../components/balance/BalanceMetricTiles";
 import { DevSimulationControls } from "../components/balance/DevSimulationControls";
 import { RealtimeBalanceGraph } from "../components/balance/RealtimeBalanceGraph";
-import { generateSimulatedMeasurement } from "../utils/copMapping";
 import { useBalanceTimeSeries } from "../hooks/useBalanceTimeSeries";
 import { useBalanceSessionRecorder } from "../hooks/useBalanceSessionRecorder";
 import { SessionControlsCard } from "../components/balance/SessionControlsCard";
@@ -18,18 +17,31 @@ import {
   MultimodalScene3D,
   MultimodalDashboardCard,
 } from "../components/multimodal";
+import { CopInfoModal } from "../components/balance/CopInfoModal";
 
 interface BodyBalancePageProps {
   patient?: PatientProfile;
 }
 
 export const BodyBalancePage: React.FC<BodyBalancePageProps> = ({ patient }) => {
-  const { status, reading: liveReading, tare } = useBalanceBoard();
+  const {
+    status,
+    reading: activeReading,
+    tare,
+    isSimulated,
+    setIsSimulated,
+    simCopX,
+    setSimCopX,
+    simCopY,
+    setSimCopY,
+    simTotalWeight,
+    setSimTotalWeight,
+  } = useBalanceBoard();
 
   const activePatient = patient ?? {
     id: "pat-001",
     medicalRecordNumber: "MRN-2026-0841",
-    fullName: "Eleanor Vance",
+    fullName: "Rohan",
     age: 58,
     gender: "Female" as const,
     heightCm: 165,
@@ -39,20 +51,6 @@ export const BodyBalancePage: React.FC<BodyBalancePageProps> = ({ patient }) => 
     assignedDoctor: "Dr. Rachel Sullivan, MD",
     lastSessionDate: "2026-09-26",
   };
-
-  // Development Simulation State
-  const [isSimulated, setIsSimulated] = useState(false);
-  const [simCopX, setSimCopX] = useState(0.0);
-  const [simCopY, setSimCopY] = useState(0.0);
-  const [simTotalWeight, setSimTotalWeight] = useState(70.0);
-
-  // Compute active reading: prefer live hardware data; if simulation is active, use simulated
-  const activeReading = useMemo(() => {
-    if (isSimulated) {
-      return generateSimulatedMeasurement(simCopX, simCopY, simTotalWeight);
-    }
-    return liveReading;
-  }, [isSimulated, simCopX, simCopY, simTotalWeight, liveReading]);
 
   // Rolling Time-Series Buffer for Real-Time Graphs (Phase 3)
   const isDataActive = status.isConnected || isSimulated;
@@ -90,6 +88,7 @@ export const BodyBalancePage: React.FC<BodyBalancePageProps> = ({ patient }) => 
   // Multimodal Unified Pipeline (Phase 5)
   const multimodal = useMultimodalTelemetry();
   const [viewMode, setViewMode] = useState<"multimodal-3d" | "force-plate-2d">("multimodal-3d");
+  const [isCopInfoOpen, setIsCopInfoOpen] = useState(false);
 
   return (
     <div
@@ -298,62 +297,74 @@ export const BodyBalancePage: React.FC<BodyBalancePageProps> = ({ patient }) => 
           <MultimodalDashboardCard telemetry={multimodal} />
         </div>
       ) : (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1.2fr 1fr",
-            gap: "24px",
-            alignItems: "start",
-          }}
-        >
+        <div className="force-plate-layout-grid">
           {/* Left Column: Visual Wii Balance Board */}
-          <Card
-            title="Force Plate Visualization"
-            subtitle="Real-time Center of Pressure (COP Ball) tracking"
-            icon={<Bluetooth size={20} />}
-          >
-            <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-              {/* Visual Board Component */}
-              <VisualBalanceBoard
-                reading={activeReading}
-                isConnected={status.isConnected}
-                isSimulated={isSimulated}
-              />
+          <div style={{ minWidth: 0, width: "100%" }}>
+            <Card
+              title={
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}>
+                  <span>Force Plate Visualization</span>
+                  <button
+                    id="force-plate-cop-info-btn"
+                    data-testid="cop-info-button"
+                    type="button"
+                    onClick={() => setIsCopInfoOpen(true)}
+                    className="cop-info-btn"
+                    aria-label="How Center of Pressure (COP) Works"
+                    title="How Center of Pressure (COP) Works"
+                    aria-haspopup="dialog"
+                    aria-expanded={isCopInfoOpen}
+                  >
+                    <Info size={13} strokeWidth={2.4} />
+                  </button>
+                </span>
+              }
+              subtitle="Real-time Center of Pressure (COP Ball) tracking"
+              icon={<Bluetooth size={20} />}
+            >
+              <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+                {/* Visual Board Component */}
+                <VisualBalanceBoard
+                  reading={activeReading}
+                  isConnected={status.isConnected}
+                  isSimulated={isSimulated}
+                />
 
-              {/* Visual Board Legend & Coordinate Guide */}
-              <div
-                style={{
-                  borderRadius: "10px",
-                  background: "var(--bg-app)",
-                  border: "1px solid var(--border-light)",
-                  padding: "12px 16px",
-                  fontSize: "0.75rem",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "8px",
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, color: "var(--text-main)" }}>
-                  <Info size={14} color="var(--teal-primary)" />
-                  <span>How to Read the Center of Pressure (COP) Ball</span>
+                {/* Visual Board Legend & Coordinate Guide */}
+                <div
+                  style={{
+                    borderRadius: "10px",
+                    background: "var(--bg-app)",
+                    border: "1px solid var(--border-light)",
+                    padding: "12px 16px",
+                    fontSize: "0.75rem",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "8px",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, color: "#0F172A" }}>
+                    <Info size={14} color="#0F766E" />
+                    <span>How to Read the Center of Pressure (COP) Ball</span>
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: "18px", color: "#334155", lineHeight: 1.5 }}>
+                    <li>
+                      <strong style={{ color: "#0F172A" }}>Center Circle:</strong> Neutral equilibrium zone (50/50 balance).
+                    </li>
+                    <li>
+                      <strong style={{ color: "#0F172A" }}>Lateral Axis (X):</strong> Negative values move <strong style={{ color: "#0F172A" }}>LEFT (-X)</strong>, positive values move <strong style={{ color: "#0F172A" }}>RIGHT (+X)</strong>.
+                    </li>
+                    <li>
+                      <strong style={{ color: "#0F172A" }}>Anteroposterior Axis (Y):</strong> Positive values lean <strong style={{ color: "#0F172A" }}>FORWARD / ANTERIOR (+Y)</strong>, negative values lean <strong style={{ color: "#0F172A" }}>BACKWARD / POSTERIOR (-Y)</strong>.
+                    </li>
+                  </ul>
                 </div>
-                <ul style={{ margin: 0, paddingLeft: "18px", color: "var(--text-muted)", lineHeight: 1.5 }}>
-                  <li>
-                    <strong>Center Circle:</strong> Neutral equilibrium zone (50/50 balance).
-                  </li>
-                  <li>
-                    <strong>Lateral Axis (X):</strong> Negative values move <strong>LEFT (-X)</strong>, positive values move <strong>RIGHT (+X)</strong>.
-                  </li>
-                  <li>
-                    <strong>Anteroposterior Axis (Y):</strong> Positive values lean <strong>FORWARD / ANTERIOR (+Y)</strong>, negative values lean <strong>BACKWARD / POSTERIOR (-Y)</strong>.
-                  </li>
-                </ul>
               </div>
-            </div>
-          </Card>
+            </Card>
+          </div>
 
           {/* Right Column: Live Measurement Cards */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          <div style={{ minWidth: 0, width: "100%", display: "flex", flexDirection: "column", gap: "16px" }}>
             <BalanceMetricTiles
               reading={activeReading}
               isConnected={status.isConnected}
@@ -479,6 +490,12 @@ export const BodyBalancePage: React.FC<BodyBalancePageProps> = ({ patient }) => 
         onChangeCopX={setSimCopX}
         onChangeCopY={setSimCopY}
         onChangeTotalWeight={setSimTotalWeight}
+      />
+
+      {/* Center of Pressure (COP) Educational / Explanatory Modal */}
+      <CopInfoModal
+        isOpen={isCopInfoOpen}
+        onClose={() => setIsCopInfoOpen(false)}
       />
     </div>
   );

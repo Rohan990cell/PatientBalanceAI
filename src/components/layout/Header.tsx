@@ -103,8 +103,9 @@ export const Header: React.FC<HeaderProps> = ({
           />
         </button>
 
-        {/* Webcam Status Pill */}
-        <div
+        {/* Camera Status Pill */}
+        <button
+          onClick={onNavigateToDevices}
           style={{
             display: "flex",
             alignItems: "center",
@@ -113,18 +114,20 @@ export const Header: React.FC<HeaderProps> = ({
             borderRadius: "10px",
             background: "#F8FAFC",
             border: "1px solid var(--border-light)",
+            cursor: "pointer",
+            transition: "all 0.15s ease",
           }}
-          title="Webcam status"
+          title="Camera & Vision hardware status"
         >
           <Camera size={15} color={webcamActive ? "var(--green-primary)" : "var(--text-muted)"} />
           <span style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", fontWeight: 500 }}>
-            Webcam:
+            Camera:
           </span>
           <StatusBadge
             status={webcamActive ? "connected" : "disconnected"}
-            label={webcamActive ? "Ready" : "Off"}
+            label={webcamActive ? "Active" : "Ready"}
           />
-        </div>
+        </button>
 
         {/* Patient Pill */}
         <div
@@ -153,7 +156,7 @@ export const Header: React.FC<HeaderProps> = ({
             <User size={13} />
           </div>
           <span style={{ fontSize: "0.8125rem", fontWeight: 600, color: "var(--text-main)" }}>
-            {mode === "patient" ? "Eleanor Vance" : "Dr. Rachel Sullivan"}
+            {mode === "patient" ? "Rohan" : "Dr. Rachel Sullivan"}
           </span>
         </div>
       </div>

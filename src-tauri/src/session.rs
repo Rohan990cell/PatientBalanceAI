@@ -226,7 +226,7 @@ mod tests {
             schema_version: 1,
             session_id: "test-session-001".into(),
             patient_id: "pat-001".into(),
-            patient_name: Some("Eleanor Vance".into()),
+            patient_name: Some("Rohan".into()),
             start_time: "2026-09-30T12:00:00.000Z".into(),
             end_time: "2026-09-30T12:00:30.000Z".into(),
             duration_ms: 30000,

@@ -4,6 +4,7 @@ import { visionEngine } from "../services/vision/VisionEngine";
 
 interface VisionContextType {
   visionState: VisionState;
+  getLatestVisionState: () => VisionState;
   startCamera: (videoEl?: HTMLVideoElement | null, canvasEl?: HTMLCanvasElement | null, deviceId?: string) => Promise<boolean>;
   stopCamera: () => void;
   switchCamera: (deviceId: string) => Promise<boolean>;
@@ -97,6 +98,10 @@ export const VisionProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return visionEngine.getMediaStream();
   }, []);
 
+  const getLatestVisionState = useCallback((): VisionState => {
+    return visionEngine.getCurrentState();
+  }, []);
+
   const setDisplayCanvas = useCallback((canvasEl: HTMLCanvasElement | null) => {
     visionEngine.setDisplayCanvas(canvasEl);
   }, []);
@@ -107,6 +112,7 @@ export const VisionProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     <VisionContext.Provider
       value={{
         visionState,
+        getLatestVisionState,
         startCamera,
         stopCamera,
         switchCamera,

@@ -35,6 +35,22 @@ export function isRealSenseDepthLabel(label?: string | null): boolean {
   return hasBrand && hasDepth && !hasRgb;
 }
 
+/**
+ * Detect whether a device label corresponds to the Lenovo integrated webcam or virtual camera.
+ */
+export function isLenovoCameraLabel(label?: string | null): boolean {
+  if (!label) return false;
+  const l = label.toLowerCase();
+  return (
+    l.includes("integrated") ||
+    l.includes("lenovo") ||
+    l.includes("sunplus") ||
+    l.includes("easycamera") ||
+    l.includes("internal") ||
+    l.includes("virtual camera")
+  );
+}
+
 export class CameraService {
   private stream: MediaStream | null = null;
   private videoElement: HTMLVideoElement | null = null;

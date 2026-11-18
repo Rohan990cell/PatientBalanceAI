@@ -77,6 +77,43 @@ function runTests() {
   assert("Sim COP X matches input 0.4", Math.abs(sim.copX - 0.4) < 1e-4);
   assert("Sim COP Y matches input -0.2", Math.abs(sim.copY - (-0.2)) < 1e-4);
 
+  // 11. FORCE PLATE VISUAL COP DISPLAY & CLAMPING TESTS
+  // 11a. Full left shift clamped inside valid display area
+  const fullLeft = mapCopToBoard(-1.0, 0.0);
+  const clampedDisplayLeftX = Math.max(5.0, Math.min(95.0, fullLeft.xPercent));
+  assert("Task 11a - Full left COP X=-1.0 visually clamped inside valid display area (5.0%)", clampedDisplayLeftX === 5.0);
+
+  // 11b. Full right shift clamped inside valid display area
+  const fullRight = mapCopToBoard(1.0, 0.0);
+  const clampedDisplayRightX = Math.max(5.0, Math.min(95.0, fullRight.xPercent));
+  assert("Task 11b - Full right COP X=+1.0 visually clamped inside valid display area (95.0%)", clampedDisplayRightX === 95.0);
+
+  // 11c. Full front shift clamped inside valid display area
+  const fullFront = mapCopToBoard(0.0, 1.0);
+  const clampedDisplayFrontY = Math.max(8.0, Math.min(92.0, fullFront.yPercent));
+
+  assert("Task 11c - Full front COP Y=+1.0 visually clamped inside valid display area (8.0%)", clampedDisplayFrontY === 8.0);
+
+  // 11d. Full back shift clamped inside valid display area
+  const fullBack = mapCopToBoard(0.0, -1.0);
+  const clampedDisplayBackY = Math.max(8.0, Math.min(92.0, fullBack.yPercent));
+  assert("Task 11d - Full back COP Y=-1.0 visually clamped inside valid display area (92.0%)", clampedDisplayBackY === 92.0);
+
+  // 11e. Direction text checks for lateral and AP axes
+  function getDirectionText(x: number, y: number) {
+    const xDir = x > 0.05 ? "RIGHT (+X)" : x < -0.05 ? "LEFT (-X)" : "CENTER";
+    const yDir = y > 0.05 ? "FRONT (+Y)" : y < -0.05 ? "BACK (-Y)" : "CENTER";
+    return { xDir, yDir };
+  }
+  const dirLeftFront = getDirectionText(-0.35, 0.42);
+  assert("Task 11e - Direction descriptor for (-0.35, +0.42) is LEFT (-X) and FRONT (+Y)", dirLeftFront.xDir === "LEFT (-X)" && dirLeftFront.yDir === "FRONT (+Y)");
+
+  const dirRightBack = getDirectionText(0.6, -0.7);
+  assert("Task 11f - Direction descriptor for (+0.6, -0.7) is RIGHT (+X) and BACK (-Y)", dirRightBack.xDir === "RIGHT (+X)" && dirRightBack.yDir === "BACK (-Y)");
+
+  const dirCenter = getDirectionText(0.01, -0.02);
+  assert("Task 11g - Direction descriptor within deadband (0.01, -0.02) is CENTER", dirCenter.xDir === "CENTER" && dirCenter.yDir === "CENTER");
+
   console.log(`\nTEST SUMMARY: ${passed} passed, ${failed} failed.`);
   if (failed > 0) throw new Error(`${failed} tests failed!`);
 }

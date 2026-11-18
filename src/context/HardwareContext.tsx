@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from "react";
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { BalanceBoardReading, BoardStatus } from "../types/hardware";
 import { generateSimulatedMeasurement } from "../utils/copMapping";
 
@@ -37,36 +37,38 @@ export const HardwareProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [rawReading, setRawReading] = useState<BalanceBoardReading | null>(null);
   const [isTauri, setIsTauri] = useState(false);
 
-  // Development Simulation State
+  // Development Simulation State (Single Source of Truth)
   const [isSimulated, setIsSimulated] = useState(false);
   const [simCopX, setSimCopX] = useState(0.0);
   const [simCopY, setSimCopY] = useState(0.0);
   const [simTotalWeight, setSimTotalWeight] = useState(70.0);
   const [simReading, setSimReading] = useState<BalanceBoardReading | null>(null);
 
-  // Simulation loop: 20Hz updates with physiological micro-sway
+  // Throttle hardware reading updates to ~30fps to avoid flooding React with state updates
+  const lastReadingUpdateRef = useRef(0);
+  const pendingReadingRef = useRef<BalanceBoardReading | null>(null);
+  const readingRafRef = useRef<number | null>(null);
+
+  // Deterministic simulation update stream
   useEffect(() => {
+    // If not simulated or physical board is live, clear simulated stream
     if (!isSimulated || status.isConnected) {
       setSimReading(null);
       return;
     }
 
-    // Initial immediate reading
-    setSimReading(generateSimulatedMeasurement(simCopX, simCopY, simTotalWeight));
+    const safeX = Number.isFinite(simCopX) ? Math.max(-1.0, Math.min(1.0, simCopX)) : 0.0;
+    const safeY = Number.isFinite(simCopY) ? Math.max(-1.0, Math.min(1.0, simCopY)) : 0.0;
+    const safeWeight = Number.isFinite(simTotalWeight) ? Math.max(0.0, simTotalWeight) : 70.0;
 
-    const interval = setInterval(() => {
-      const t = Date.now();
-      const naturalSwayX = simCopX + Math.sin(t / 800) * 0.03;
-      const naturalSwayY = simCopY + Math.cos(t / 950) * 0.02;
-      const m = generateSimulatedMeasurement(naturalSwayX, naturalSwayY, simTotalWeight);
-      setSimReading(m);
-    }, 50);
-
-    return () => clearInterval(interval);
+    setSimReading(generateSimulatedMeasurement(safeX, safeY, safeWeight));
   }, [isSimulated, status.isConnected, simCopX, simCopY, simTotalWeight]);
 
-  // Real hardware reading takes strict priority; simulation reading active only when simulation enabled
-  const reading = useMemo(() => {
+  // Scientific data integrity:
+  // 1. Live hardware reading takes strict priority when connected.
+  // 2. Simulation reading is active ONLY when simulation is explicitly enabled AND hardware is not connected.
+  // 3. When disconnected with simulation off, reading is strictly null (no fake 70kg / 50/50 balance).
+  const reading = useMemo<BalanceBoardReading | null>(() => {
     if (status.isConnected) {
       return rawReading;
     }
@@ -79,6 +81,10 @@ export const HardwareProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const isBoardActive = status.isConnected || isSimulated;
 
   useEffect(() => {
+    let isMounted = true;
+    let unlistenData: (() => void) | undefined;
+    let unlistenStatus: (() => void) | undefined;
+
     const hasTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
     setIsTauri(hasTauri);
 
@@ -90,64 +96,79 @@ export const HardwareProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return;
     }
 
-    let unlistenData: (() => void) | undefined;
-    let unlistenStatus: (() => void) | undefined;
-
     const setupListeners = async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         const { listen } = await import("@tauri-apps/api/event");
 
-        // Initial status check
+        // Initial hardware status check
         const initialStatus = await invoke<BoardStatus>("get_balance_board_status");
-        if (initialStatus) {
+        if (isMounted && initialStatus && typeof initialStatus === "object") {
           setStatus(initialStatus);
+          if (!initialStatus.isConnected) {
+            setRawReading(null);
+          }
         }
 
         // Listen for hardware status updates
-        unlistenStatus = await listen<BoardStatus>("balance-board-status", (event) => {
-          setStatus(event.payload);
-          if (!event.payload.isConnected) {
-            setRawReading(null);
+        const uStatus = await listen<BoardStatus>("balance-board-status", (event) => {
+          if (!isMounted) return;
+          if (event && event.payload && typeof event.payload === "object") {
+            setStatus(event.payload);
+            if (!event.payload.isConnected) {
+              setRawReading(null);
+            }
           }
         });
+        if (isMounted) {
+          unlistenStatus = uStatus;
+        } else {
+          uStatus();
+        }
 
         // Listen for high-throughput live reading events
-        let lastLog = 0;
-        unlistenData = await listen<BalanceBoardReading>("balance-board-data", (event) => {
-          setRawReading(event.payload);
-          const now = Date.now();
-          if (now - lastLog > 500) {
-            lastLog = now;
-            console.log("[HardwareContext DIAGNOSTIC LIVE DATA]", {
-              totalWeight: `${event.payload.totalWeight.toFixed(2)} kg`,
-              calibratedKg: {
-                FL: event.payload.frontLeft.toFixed(2),
-                FR: event.payload.frontRight.toFixed(2),
-                BL: event.payload.backLeft.toFixed(2),
-                BR: event.payload.backRight.toFixed(2),
-              },
-              rawADC: {
-                FL: event.payload.rawFrontLeft,
-                FR: event.payload.rawFrontRight,
-                BL: event.payload.rawBackLeft,
-                BR: event.payload.rawBackRight,
-              },
-              directionalPct: {
-                left: `${event.payload.leftPercent.toFixed(1)}%`,
-                right: `${event.payload.rightPercent.toFixed(1)}%`,
-                anterior: `${event.payload.anteriorPercent.toFixed(1)}%`,
-                posterior: `${event.payload.posteriorPercent.toFixed(1)}%`,
-              },
-              cop: {
-                x: event.payload.copX.toFixed(3),
-                y: event.payload.copY.toFixed(3),
-                xMm: event.payload.copXMm.toFixed(1),
-                yMm: event.payload.copYMm.toFixed(1),
-              },
-            });
+        const uData = await listen<BalanceBoardReading>("balance-board-data", (event) => {
+          if (!isMounted) return;
+          if (event && event.payload && typeof event.payload === "object") {
+            const p = event.payload;
+            // Defensive validation of incoming payload
+            if (
+              typeof p.totalWeight === "number" &&
+              Number.isFinite(p.totalWeight) &&
+              typeof p.copX === "number" &&
+              Number.isFinite(p.copX) &&
+              typeof p.copY === "number" &&
+              Number.isFinite(p.copY)
+            ) {
+              // Throttle React state updates to ~20fps (50ms) to prevent layout thrashing.
+              // The raw hardware may emit at 50-100Hz; subscribers only need ~20fps for smooth UI.
+              const now = Date.now();
+              if (now - lastReadingUpdateRef.current >= 50) {
+                lastReadingUpdateRef.current = now;
+                setRawReading(p);
+              } else {
+                // Store latest for deferred flush
+                pendingReadingRef.current = p;
+                if (!readingRafRef.current) {
+                  readingRafRef.current = requestAnimationFrame(() => {
+                    readingRafRef.current = null;
+                    const pending = pendingReadingRef.current;
+                    if (pending && isMounted) {
+                      lastReadingUpdateRef.current = Date.now();
+                      setRawReading(pending);
+                      pendingReadingRef.current = null;
+                    }
+                  });
+                }
+              }
+            }
           }
         });
+        if (isMounted) {
+          unlistenData = uData;
+        } else {
+          uData();
+        }
       } catch (err) {
         console.error("Failed to setup Tauri hardware listeners:", err);
       }
@@ -156,8 +177,25 @@ export const HardwareProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setupListeners();
 
     return () => {
-      if (unlistenData) unlistenData();
-      if (unlistenStatus) unlistenStatus();
+      isMounted = false;
+      if (readingRafRef.current) {
+        cancelAnimationFrame(readingRafRef.current);
+        readingRafRef.current = null;
+      }
+      if (unlistenData) {
+        try {
+          unlistenData();
+        } catch {
+          // ignore
+        }
+      }
+      if (unlistenStatus) {
+        try {
+          unlistenStatus();
+        } catch {
+          // ignore
+        }
+      }
     };
   }, []);
 
@@ -220,13 +258,29 @@ export const HardwareProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, [isTauri]);
 
   const disconnect = useCallback(async () => {
-    if (!isTauri) return;
+    if (!isTauri) {
+      setRawReading(null);
+      setStatus((s) => ({
+        ...s,
+        isConnected: false,
+        isScanning: false,
+        message: "Disconnected.",
+      }));
+      return;
+    }
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("disconnect_balance_board");
       setRawReading(null);
+      setStatus((s) => ({
+        ...s,
+        isConnected: false,
+        isScanning: false,
+        message: "Disconnected. Press SYNC on your board to reconnect.",
+      }));
     } catch (err) {
       console.error("Disconnect failed:", err);
+      setRawReading(null);
     }
   }, [isTauri]);
 

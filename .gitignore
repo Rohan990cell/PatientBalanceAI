@@ -1,6 +1,8 @@
 node_modules/
 dist/
 target/
+src-tauri/target/
+src-tauri/target_check/
 .env
 .env.*
 !.env.example
@@ -10,3 +12,5 @@ target/
 .idea/
 .DS_Store
 Thumbs.db
+
+reports/*.pdf
