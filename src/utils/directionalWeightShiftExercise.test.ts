@@ -31,6 +31,9 @@ import {
   DEFAULT_COORDINATE_SAMPLE_COUNT,
   calculateCoordinateErrorMetrics,
   CoordinateErrorMetrics,
+  computeHoldFrameTargetError,
+  buildHoldWindowErrorSeries,
+  HoldWindowFrameSample,
   DEFAULT_PATIENT_TARGET_OFFSETS_MM,
   PatientSpecificTargetConfig,
   isBaselineCalibrationReady,
@@ -2347,6 +2350,79 @@ function runTests() {
     finalizedUnloaded.invalidSampleCount === 1,
     `Test 60c: Unloaded plate is tracked as invalid sample (got ${finalizedUnloaded.invalidSampleCount})`
   );
+
+  // -------------------------------------------------------------
+  // Test 61: Hold-window per-frame error e = √((x1−xt)² + (y1−yt)²)
+  // -------------------------------------------------------------
+  console.log("\n--- Test 61: Hold-window frame target error ---");
+  {
+    const targetX = 0.38;
+    const targetY = 0.0;
+    const copX = 0.30;
+    const copY = 0.10;
+    const err = computeHoldFrameTargetError(targetX, targetY, copX, copY);
+    const expectedNorm = Math.hypot(targetX - copX, targetY - copY);
+    const expectedMm = Math.hypot(
+      targetX * WII_BOARD_DIMENSIONS.halfDistanceXMm - copX * WII_BOARD_DIMENSIONS.halfDistanceXMm,
+      targetY * WII_BOARD_DIMENSIONS.halfDistanceYMm - copY * WII_BOARD_DIMENSIONS.halfDistanceYMm
+    );
+    assert(
+      Math.abs(err.errorNorm - expectedNorm) < 1e-5,
+      `Test 61a: normalized error matches hypot (got ${err.errorNorm}, expected ${expectedNorm})`
+    );
+    assert(
+      Math.abs(err.errorMm - expectedMm) < 0.05,
+      `Test 61b: mm error matches hypot (got ${err.errorMm}, expected ${expectedMm})`
+    );
+
+    const samples: HoldWindowFrameSample[] = [0, 1, 2].map((i) => {
+      const xt = targetX - 0.02 * (i + 1);
+      const yt = 0.01 * i;
+      const e = computeHoldFrameTargetError(targetX, targetY, xt, yt);
+      return {
+        frameIndex: i + 1,
+        syncTimestamp: 1000 + i * 50,
+        syncEpochMs: 1000,
+        boardTimestampMs: 1000 + i * 50,
+        visionTimestampMs: 1000 + i * 50,
+        boardRelMs: i * 50,
+        visionRelMs: i * 50,
+        holdRelMs: i * 50,
+        timeSkewMs: 0,
+        targetX,
+        targetY,
+        targetXMm: e.targetXMm,
+        targetYMm: e.targetYMm,
+        copX: xt,
+        copY: yt,
+        copXMm: e.copXMm,
+        copYMm: e.copYMm,
+        errorNorm: e.errorNorm,
+        errorMm: e.errorMm,
+        dxMm: parseFloat((e.copXMm - e.targetXMm).toFixed(2)),
+        dyMm: parseFloat((e.copYMm - e.targetYMm).toFixed(2)),
+        isInside: i >= 1,
+        weightKg: 70,
+        hasPose: true,
+        visionFps: 30,
+      };
+    });
+    const series = buildHoldWindowErrorSeries({
+      targetId: "t-test",
+      stepNumber: 1,
+      targetName: "SHIFT RIGHT",
+      shortLabel: "RIGHT",
+      requiredHoldDurationSeconds: 2,
+      samples,
+    });
+    assert(series.sampleCount === 3, `Test 61c: sampleCount is 3 (got ${series.sampleCount})`);
+    assert(series.meanErrorMm !== null && series.meanErrorMm > 0, "Test 61d: meanErrorMm > 0");
+    assert(series.rmsErrorMm !== null && series.rmsErrorMm >= (series.meanErrorMm ?? 0) - 0.01, "Test 61e: RMS >= mean (approx)");
+    assert(
+      series.finalHoldStartFrameIndex === 2 && series.finalHoldEndFrameIndex === 3,
+      `Test 61f: final hold frames 2–3 (got ${series.finalHoldStartFrameIndex}–${series.finalHoldEndFrameIndex})`
+    );
+  }
 
   // -------------------------------------------------------------
   // Summary

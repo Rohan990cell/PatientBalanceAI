@@ -89,6 +89,15 @@ async fn save_pdf_report(
     session::save_pdf_report(&app, &filename, &pdf_bytes)
 }
 
+#[tauri::command]
+async fn save_text_report(
+    app: AppHandle,
+    filename: String,
+    contents: String,
+) -> Result<String, String> {
+    session::save_text_report(&app, &filename, &contents)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::init();
@@ -107,6 +116,7 @@ pub fn run() {
             load_balance_session,
             list_saved_sessions,
             save_pdf_report,
+            save_text_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running PatientBalanceAI application");

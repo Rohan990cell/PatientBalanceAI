@@ -12,6 +12,11 @@
 
 import { SMPLPose } from "./smpl";
 import { BodyPoseLandmarks, CameraStatusType } from "./vision";
+import { Pose2DAngles } from "../utils/pose2dAngles";
+
+/** Shared multimodal fusion rate (camera-paced). Board still acquires ~100 Hz underneath. */
+export const MULTIMODAL_FUSION_FPS = 30;
+export const MULTIMODAL_FUSION_INTERVAL_MS = Math.round(1000 / MULTIMODAL_FUSION_FPS);
 
 export type MultimodalTelemetryMode =
   | "FULL_MULTIMODAL"
@@ -83,6 +88,8 @@ export interface VisionTelemetry {
   fps: number;
   /** Video frame timestamp (unix ms or performance.now) */
   timestamp: number | null;
+  /** 2D joint angles from MediaPipe landmarks (null fields when joints occluded) */
+  pose2dAngles: Pose2DAngles | null;
 }
 
 /**
@@ -102,6 +109,10 @@ export interface MultimodalTelemetryState {
     timeSkewMs: number | null;
     /** Human-readable synchronization description */
     strategy: string;
+    /** Fusion tick rate (Hz) — camera-paced soft sync */
+    fusionFps: number;
+    /** Wall-clock time of last fusion snapshot */
+    fusedAtMs: number | null;
   };
   /** Mandatory development simulation warning banner (null for real hardware / unavailable) */
   simulationWarning: string | null;

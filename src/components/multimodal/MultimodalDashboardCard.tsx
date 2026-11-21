@@ -349,9 +349,18 @@ export const MultimodalDashboardCard: React.FC<MultimodalDashboardCardProps> = (
             Sync Status:{" "}
             <strong style={{ color: telemetry.synchronization.isSynchronized ? "#15803D" : "#64748B" }}>
               {telemetry.synchronization.isSynchronized
-                ? `Active Sync (Skew: ${telemetry.synchronization.timeSkewMs ?? 0}ms)`
+                ? `Active Sync @ ${telemetry.synchronization.fusionFps ?? 30} Hz (Skew: ${telemetry.synchronization.timeSkewMs ?? 0}ms)`
                 : "Single Stream / Standby"}
             </strong>
+            {telemetry.vision.pose2dAngles && (
+              <span style={{ marginLeft: 12 }}>
+                2D Angles — L/R Knee:{" "}
+                <strong>
+                  {telemetry.vision.pose2dAngles.leftKneeDeg ?? "--"}° /{" "}
+                  {telemetry.vision.pose2dAngles.rightKneeDeg ?? "--"}°
+                </strong>
+              </span>
+            )}
           </div>
         </div>
       </div>

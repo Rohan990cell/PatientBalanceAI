@@ -216,6 +216,28 @@ pub fn save_pdf_report(app: &AppHandle, filename: &str, pdf_bytes: &[u8]) -> Res
     Ok(final_path.to_string_lossy().to_string())
 }
 
+/// Save a UTF-8 text report (JSON/CSV/TXT) into the local reports directory.
+pub fn save_text_report(app: &AppHandle, filename: &str, contents: &str) -> Result<String, String> {
+    let reports_dir = get_reports_dir(app)?;
+    let trimmed = filename.trim();
+    let (stem, ext) = if let Some((s, e)) = trimmed.rsplit_once('.') {
+        (s, e)
+    } else {
+        (trimmed, "txt")
+    };
+    let safe_stem = sanitize_filename(stem);
+    let safe_ext = sanitize_filename(ext);
+    let final_path = reports_dir.join(format!("{safe_stem}.{safe_ext}"));
+    let temp_path = reports_dir.join(format!("{safe_stem}.{safe_ext}.tmp"));
+
+    fs::write(&temp_path, contents.as_bytes())
+        .map_err(|e| format!("Failed to write temporary text report: {e}"))?;
+    fs::rename(&temp_path, &final_path)
+        .map_err(|e| format!("Failed to finalize text report: {e}"))?;
+
+    Ok(final_path.to_string_lossy().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

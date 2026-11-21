@@ -6,7 +6,10 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use hidapi::{HidApi, HidDevice};
 
-use crate::hardware::constants::{SENSOR_HALF_X_MM, SENSOR_HALF_Y_MM, UNLOADED_THRESHOLD_KG};
+use crate::hardware::constants::{
+    MAX_TARE_PER_CORNER_KG, MAX_TARE_TOTAL_KG, SENSOR_HALF_X_MM, SENSOR_HALF_Y_MM,
+    TARE_AVERAGE_SAMPLES, UNLOADED_THRESHOLD_KG,
+};
 use crate::hardware::types::BalanceBoardReading;
 
 const HID_INTERFACE_LED_INPUT: u8 = 0x11;
@@ -149,6 +152,11 @@ pub struct BoardHidDevice {
     tare_tl: f32,
     tare_bl: f32,
     tare_pending: bool,
+    tare_samples_remaining: u32,
+    tare_sum_tr: f32,
+    tare_sum_br: f32,
+    tare_sum_tl: f32,
+    tare_sum_bl: f32,
     packet_count: u64,
     last_log_instant: std::time::Instant,
     last_timeout_log: std::time::Instant,
@@ -249,6 +257,9 @@ impl BoardHidDevice {
 
         debug_log("Wii Balance Board successfully opened and streaming loop initialized.");
 
+        // Do NOT auto-tare on connect: empty-board residual is zeroed via
+        // UNLOADED_THRESHOLD_KG. Auto-tare was subtracting ~3–4 kg of empty-board
+        // calibrated offset from every standing reading. Use Zero Tare only when needed.
         Ok(Self {
             device,
             calibration,
@@ -257,6 +268,11 @@ impl BoardHidDevice {
             tare_tl: 0.0,
             tare_bl: 0.0,
             tare_pending: false,
+            tare_samples_remaining: 0,
+            tare_sum_tr: 0.0,
+            tare_sum_br: 0.0,
+            tare_sum_tl: 0.0,
+            tare_sum_bl: 0.0,
             packet_count: 0,
             last_log_instant: std::time::Instant::now() - std::time::Duration::from_secs(10),
             last_timeout_log: std::time::Instant::now() - std::time::Duration::from_secs(10),
@@ -264,10 +280,18 @@ impl BoardHidDevice {
     }
 
     /// Zero out current weight as baseline tare.
-    /// Sets a flag to capture the next calibrated frame as the baseline tare offset without blocking HID reads.
+    /// Averages `TARE_AVERAGE_SAMPLES` calibrated frames (empty board) for a stable offset.
     pub fn tare(&mut self) {
-        debug_log("Requesting board tare zero calibration on next frame...");
+        debug_log(&format!(
+            "Requesting board tare zero calibration (averaging {} samples)...",
+            TARE_AVERAGE_SAMPLES
+        ));
         self.tare_pending = true;
+        self.tare_samples_remaining = TARE_AVERAGE_SAMPLES;
+        self.tare_sum_tr = 0.0;
+        self.tare_sum_br = 0.0;
+        self.tare_sum_tl = 0.0;
+        self.tare_sum_bl = 0.0;
     }
 
     /// Reads one incoming HID report and calculates real load cell values.
@@ -354,20 +378,50 @@ impl BoardHidDevice {
         let tl_cal = calculate_single_weight(tl_raw, &self.calibration.top_left);
         let bl_cal = calculate_single_weight(bl_raw, &self.calibration.bottom_left);
 
-        // Capture zero tare if requested
+        // Capture averaged zero tare (Zero Tare button only — board must be empty)
         if self.tare_pending {
-            self.tare_tr = tr_cal;
-            self.tare_br = br_cal;
-            self.tare_tl = tl_cal;
-            self.tare_bl = bl_cal;
-            self.tare_pending = false;
-            debug_log(&format!(
-                "Tare offsets captured: FL={:.2} kg, FR={:.2} kg, BL={:.2} kg, BR={:.2} kg",
-                self.tare_tl,
-                self.tare_tr,
-                self.tare_bl,
-                self.tare_br
-            ));
+            self.tare_sum_tr += tr_cal;
+            self.tare_sum_br += br_cal;
+            self.tare_sum_tl += tl_cal;
+            self.tare_sum_bl += bl_cal;
+            if self.tare_samples_remaining > 0 {
+                self.tare_samples_remaining -= 1;
+            }
+            if self.tare_samples_remaining == 0 {
+                let n = TARE_AVERAGE_SAMPLES.max(1) as f32;
+                let mut next_tr = self.tare_sum_tr / n;
+                let mut next_br = self.tare_sum_br / n;
+                let mut next_tl = self.tare_sum_tl / n;
+                let mut next_bl = self.tare_sum_bl / n;
+                self.tare_pending = false;
+
+                // Only keep residual empty-board offsets; reject if board was loaded.
+                let tare_total = next_tl.max(0.0) + next_tr.max(0.0) + next_bl.max(0.0) + next_br.max(0.0);
+                if tare_total > MAX_TARE_TOTAL_KG {
+                    debug_log(&format!(
+                        "Tare REJECTED (board not empty): total offset {:.2} kg > {:.2} kg limit. Keeping previous tare.",
+                        tare_total, MAX_TARE_TOTAL_KG
+                    ));
+                } else {
+                    next_tl = next_tl.clamp(-MAX_TARE_PER_CORNER_KG, MAX_TARE_PER_CORNER_KG);
+                    next_tr = next_tr.clamp(-MAX_TARE_PER_CORNER_KG, MAX_TARE_PER_CORNER_KG);
+                    next_bl = next_bl.clamp(-MAX_TARE_PER_CORNER_KG, MAX_TARE_PER_CORNER_KG);
+                    next_br = next_br.clamp(-MAX_TARE_PER_CORNER_KG, MAX_TARE_PER_CORNER_KG);
+                    self.tare_tr = next_tr;
+                    self.tare_br = next_br;
+                    self.tare_tl = next_tl;
+                    self.tare_bl = next_bl;
+                    debug_log(&format!(
+                        "Tare offsets captured (avg of {} samples): FL={:.2} kg, FR={:.2} kg, BL={:.2} kg, BR={:.2} kg (sum={:.2})",
+                        TARE_AVERAGE_SAMPLES,
+                        self.tare_tl,
+                        self.tare_tr,
+                        self.tare_bl,
+                        self.tare_br,
+                        tare_total
+                    ));
+                }
+            }
         }
 
         let reading = compute_balance_metrics(
@@ -431,13 +485,24 @@ pub fn compute_balance_metrics(
     timestamp: i64,
 ) -> BalanceBoardReading {
     // 1. Net calibrated force per corner (kg)
-    let fl = (tl_cal - tare_tl).max(0.0);
-    let fr = (tr_cal - tare_tr).max(0.0);
-    let bl = (bl_cal - tare_bl).max(0.0);
-    let br = (br_cal - tare_br).max(0.0);
+    let mut fl = (tl_cal - tare_tl).max(0.0);
+    let mut fr = (tr_cal - tare_tr).max(0.0);
+    let mut bl = (bl_cal - tare_bl).max(0.0);
+    let mut br = (br_cal - tare_br).max(0.0);
 
     // 2. Total Weight (FL + FR + BL + BR)
-    let total_weight = fl + fr + bl + br;
+    let mut total_weight = fl + fr + bl + br;
+
+    // Empty-board residual / hysteresis: report a clean zero so ~1 kg corner
+    // flicker never shows as weight or pins COP to a corner.
+    let is_unloaded = total_weight <= UNLOADED_THRESHOLD_KG;
+    if is_unloaded {
+        fl = 0.0;
+        fr = 0.0;
+        bl = 0.0;
+        br = 0.0;
+        total_weight = 0.0;
+    }
 
     // 3. Directional Weights
     let left_weight = fl + bl;
@@ -447,7 +512,7 @@ pub fn compute_balance_metrics(
 
     // 4. Directional Percentages & Center of Pressure (COP)
     let (left_percent, right_percent, anterior_percent, posterior_percent, cop_x, cop_y) =
-        if total_weight > UNLOADED_THRESHOLD_KG {
+        if !is_unloaded {
             let left_pct = ((left_weight / total_weight) * 100.0).clamp(0.0, 100.0);
             let right_pct = ((right_weight / total_weight) * 100.0).clamp(0.0, 100.0);
             let ant_pct = ((anterior_weight / total_weight) * 100.0).clamp(0.0, 100.0);
@@ -626,6 +691,32 @@ mod tests {
         assert_eq!(r.cop_y, 0.0);
         assert_eq!(r.cop_x_mm, 0.0);
         assert_eq!(r.cop_y_mm, 0.0);
+    }
+
+    #[test]
+    fn test_empty_board_corner_residual_zeroed() {
+        // Real-world empty board: ~1 kg residual on BR after hysteresis / untared connect.
+        // Must not show phantom weight or pin COP to the back-right corner.
+        let r = compute_balance_metrics(
+            0.0, 0.0, 0.0, 1.01,
+            0.0, 0.0, 0.0, 0.0,
+            6269, 11234, 981, 6133,
+            1000,
+        );
+
+        assert_eq!(r.total_weight, 0.0);
+        assert_eq!(r.front_left, 0.0);
+        assert_eq!(r.front_right, 0.0);
+        assert_eq!(r.back_left, 0.0);
+        assert_eq!(r.back_right, 0.0);
+        assert_eq!(r.left_percent, 50.0);
+        assert_eq!(r.right_percent, 50.0);
+        assert_eq!(r.cop_x, 0.0);
+        assert_eq!(r.cop_y, 0.0);
+        assert_eq!(r.cop_x_mm, 0.0);
+        assert_eq!(r.cop_y_mm, 0.0);
+        // Raw ADC still preserved for diagnostics
+        assert_eq!(r.raw_back_right, 6133);
     }
 
     #[test]

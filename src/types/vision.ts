@@ -127,6 +127,11 @@ export interface VisionState {
   modelsLoaded: boolean;
   modelLoadingMessage: string;
   fps: number;
+  /**
+   * Wall-clock Date.now() (ms) when the latest pose/video frame was processed.
+   * Same clock domain as Wii board sample timestamps for soft multimodal sync.
+   */
+  frameTimestampMs: number | null;
   
   // Devices & display
   availableCameras: CameraDeviceInfo[];
@@ -155,6 +160,7 @@ export const INITIAL_VISION_STATE: VisionState = {
   modelsLoaded: false,
   modelLoadingMessage: "",
   fps: 0,
+  frameTimestampMs: null,
   availableCameras: [],
   selectedCameraId: null,
   activeCameraLabel: null,

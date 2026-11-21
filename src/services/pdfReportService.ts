@@ -1,7 +1,9 @@
 import { BalanceSession } from "../types/session";
 import { DirectionalWeightShiftSessionSummary } from "../utils/directionalWeightShiftExercise";
 import { LegRaiseSessionSummary } from "../utils/multimodalLegRaiseExercise";
+import { Pose2DAngleSessionReport } from "../utils/pose2dAngles";
 import { PdfReportGenerator } from "./pdfReportGenerator";
+import { Pose2DAngleReportService } from "./pose2dAngleReportService";
 
 export interface GeneratePdfResult {
   filename: string;
@@ -65,14 +67,16 @@ export class PdfReportService {
    * and returns the resulting Directional Weight Shift report details.
    */
   public static async generateAndSaveDirectionalReport(
-    summary: DirectionalWeightShiftSessionSummary
-  ): Promise<GeneratePdfResult> {
+    summary: DirectionalWeightShiftSessionSummary,
+    angleReport?: Pose2DAngleSessionReport | null
+  ): Promise<GeneratePdfResult & { angleJsonPath?: string }> {
     if (!summary || !summary.sessionId) {
       throw new Error("Invalid directional session summary provided for PDF generation.");
     }
 
     const filename = `PatientBalanceAI_DirectionalReport_${summary.sessionId}.pdf`;
-    const doc = PdfReportGenerator.generateDirectionalWeightShiftReport(summary);
+    // PDF includes board report + board-synced 2D angle tables (absolute + changes)
+    const doc = PdfReportGenerator.generateDirectionalWeightShiftReport(summary, angleReport);
 
     let filePath = filename;
 
@@ -99,10 +103,28 @@ export class PdfReportService {
       console.warn("doc.save fallback warning:", saveErr);
     }
 
+    // Also persist JSON + CSV for both angle tables locally alongside the PDF
+    let angleJsonPath: string | undefined;
+    if (angleReport && angleReport.snapshots.length > 0) {
+      try {
+        const saved = await Pose2DAngleReportService.saveLocally(angleReport, {
+          sessionId: summary.sessionId,
+          patientId: summary.patientId,
+          patientName: summary.patientName,
+          sessionDate: summary.sessionDate,
+          isRealHardware: summary.isRealHardware,
+        });
+        angleJsonPath = saved.jsonPath;
+      } catch (err) {
+        console.warn("Pose2D angle report local save failed during PDF download:", err);
+      }
+    }
+
     return {
       filename,
       filePath,
       success: true,
+      angleJsonPath,
     };
   }
 

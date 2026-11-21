@@ -30,10 +30,51 @@ export const VisionProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const persistentCanvasRef = React.useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
-    // Subscribe to VisionEngine state changes
+    // High-freq pose frames stay on the engine; React UI is throttled so exercise
+    // pages (board + targets) are not re-rendered at camera FPS.
+    let lastUiPushMs = 0;
+    let pendingState: VisionState | null = null;
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const UI_MIN_INTERVAL_MS = 100; // ~10Hz for pose/fps updates
+    let lastStatusKey = "";
+
+    const pushUi = (state: VisionState) => {
+      lastUiPushMs = Date.now();
+      pendingState = null;
+      setVisionState(state);
+      setIsMirrored(state.isMirrored);
+    };
+
     visionEngine.onStateUpdate((newState) => {
-      setVisionState(newState);
-      setIsMirrored(newState.isMirrored);
+      const statusKey = `${newState.cameraStatus}|${newState.errorMessage ?? ""}|${newState.selectedCameraId ?? ""}|${newState.availableCameras.length}|${newState.isMirrored}`;
+      const statusChanged = statusKey !== lastStatusKey;
+      if (statusChanged) {
+        lastStatusKey = statusKey;
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        pushUi(newState);
+        return;
+      }
+
+      const now = Date.now();
+      if (now - lastUiPushMs >= UI_MIN_INTERVAL_MS) {
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        pushUi(newState);
+        return;
+      }
+
+      pendingState = newState;
+      if (!flushTimer) {
+        flushTimer = setTimeout(() => {
+          flushTimer = null;
+          if (pendingState) pushUi(pendingState);
+        }, Math.max(0, UI_MIN_INTERVAL_MS - (Date.now() - lastUiPushMs)));
+      }
     });
 
     // Enumerate cameras on startup
@@ -41,6 +82,7 @@ export const VisionProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     // Cleanup on unmount of provider
     return () => {
+      if (flushTimer) clearTimeout(flushTimer);
       visionEngine.stop();
     };
   }, []);

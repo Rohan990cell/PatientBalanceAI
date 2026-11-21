@@ -47,7 +47,8 @@ export const HardwareProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   // Throttle hardware reading updates to ~30fps to avoid flooding React with state updates
   const lastReadingUpdateRef = useRef(0);
   const pendingReadingRef = useRef<BalanceBoardReading | null>(null);
-  const readingRafRef = useRef<number | null>(null);
+  const readingFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const READING_UI_MS = 33;
 
   // Deterministic simulation update stream
   useEffect(() => {
@@ -140,26 +141,29 @@ export const HardwareProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               typeof p.copY === "number" &&
               Number.isFinite(p.copY)
             ) {
-              // Throttle React state updates to ~20fps (50ms) to prevent layout thrashing.
-              // The raw hardware may emit at 50-100Hz; subscribers only need ~20fps for smooth UI.
+              // Throttle React state to ~30fps. Always keep the latest sample for the deferred flush
+              // (do not use rAF — that was flushing every frame and defeating the throttle).
+              pendingReadingRef.current = p;
               const now = Date.now();
-              if (now - lastReadingUpdateRef.current >= 50) {
+              const elapsed = now - lastReadingUpdateRef.current;
+              if (elapsed >= READING_UI_MS) {
                 lastReadingUpdateRef.current = now;
                 setRawReading(p);
-              } else {
-                // Store latest for deferred flush
-                pendingReadingRef.current = p;
-                if (!readingRafRef.current) {
-                  readingRafRef.current = requestAnimationFrame(() => {
-                    readingRafRef.current = null;
-                    const pending = pendingReadingRef.current;
-                    if (pending && isMounted) {
-                      lastReadingUpdateRef.current = Date.now();
-                      setRawReading(pending);
-                      pendingReadingRef.current = null;
-                    }
-                  });
+                pendingReadingRef.current = null;
+                if (readingFlushTimerRef.current) {
+                  clearTimeout(readingFlushTimerRef.current);
+                  readingFlushTimerRef.current = null;
                 }
+              } else if (!readingFlushTimerRef.current) {
+                readingFlushTimerRef.current = setTimeout(() => {
+                  readingFlushTimerRef.current = null;
+                  const pending = pendingReadingRef.current;
+                  if (pending && isMounted) {
+                    lastReadingUpdateRef.current = Date.now();
+                    setRawReading(pending);
+                    pendingReadingRef.current = null;
+                  }
+                }, Math.max(0, READING_UI_MS - elapsed));
               }
             }
           }
@@ -178,9 +182,9 @@ export const HardwareProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     return () => {
       isMounted = false;
-      if (readingRafRef.current) {
-        cancelAnimationFrame(readingRafRef.current);
-        readingRafRef.current = null;
+      if (readingFlushTimerRef.current) {
+        clearTimeout(readingFlushTimerRef.current);
+        readingFlushTimerRef.current = null;
       }
       if (unlistenData) {
         try {

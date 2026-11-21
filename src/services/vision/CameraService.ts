@@ -51,6 +51,23 @@ export function isLenovoCameraLabel(label?: string | null): boolean {
   );
 }
 
+/** Virtual/OBS-style cameras often publish a black frame when no source is active. */
+export function isVirtualCameraLabel(label?: string | null): boolean {
+  if (!label) return false;
+  const l = label.toLowerCase();
+  return (
+    l.includes("virtual") ||
+    l.includes("obs") ||
+    l.includes("manycam") ||
+    l.includes("snap camera") ||
+    l.includes("droidcam") ||
+    l.includes("iriun")
+  );
+}
+
+/** Locked multimodal camera rate for RealSense RGB + MediaPipe 2D pose/angles */
+export const TARGET_CAMERA_FPS = 30;
+
 export class CameraService {
   private stream: MediaStream | null = null;
   private videoElement: HTMLVideoElement | null = null;
@@ -157,28 +174,74 @@ export class CameraService {
     }
 
     try {
-      // Requirement 7: When deviceId is provided, use { video: { deviceId: { exact: selectedDeviceId } } }
-      const videoConstraints: MediaTrackConstraints = deviceId
-        ? { deviceId: { exact: deviceId } }
-        : { facingMode: "user" };
+      // Prefer Intel RealSense RGB when available; never fall back to a black Virtual Camera
+      const cameras = await this.getAvailableCameras(false);
+      const realSenseRgb = cameras.find((d) => isRealSenseRgbLabel(d.label));
+      const physicalFallback = cameras.find(
+        (d) => !isRealSenseDepthLabel(d.label) && !isVirtualCameraLabel(d.label)
+      );
+      const requested = deviceId
+        ? cameras.find((d) => d.deviceId === deviceId)
+        : undefined;
+      // If caller asked for a virtual cam (or selection is virtual) but RealSense exists, use RealSense
+      const resolvedDeviceId =
+        requested && isVirtualCameraLabel(requested.label) && realSenseRgb
+          ? realSenseRgb.deviceId
+          : deviceId || realSenseRgb?.deviceId || physicalFallback?.deviceId || undefined;
+      const preferRealSense = Boolean(
+        (resolvedDeviceId &&
+          cameras.some((d) => d.deviceId === resolvedDeviceId && isRealSenseRgbLabel(d.label))) ||
+          (!deviceId && realSenseRgb)
+      );
+
+      // Requirement 7: exact deviceId when known; always request 30 FPS for multimodal fusion
+      const videoConstraints: MediaTrackConstraints = {
+        ...(resolvedDeviceId
+          ? { deviceId: { exact: resolvedDeviceId } }
+          : { facingMode: "user" as const }),
+        frameRate: preferRealSense
+          ? { ideal: TARGET_CAMERA_FPS, max: TARGET_CAMERA_FPS }
+          : { ideal: TARGET_CAMERA_FPS, max: 60 },
+        width: { ideal: preferRealSense ? 1280 : 1280 },
+        height: { ideal: preferRealSense ? 720 : 720 },
+      };
 
       const constraints: MediaStreamConstraints = {
         video: videoConstraints,
         audio: false, // Medical privacy: do NOT request microphone access
       };
 
-      console.log("[CameraService] Calling getUserMedia with constraints:", JSON.stringify(constraints));
+      console.log(
+        `[CameraService] Calling getUserMedia (target ${TARGET_CAMERA_FPS} FPS` +
+          `${preferRealSense ? ", RealSense RGB preferred" : ""}):`,
+        JSON.stringify(constraints)
+      );
 
       let stream: MediaStream;
       try {
         stream = await navigator.mediaDevices.getUserMedia(constraints);
       } catch (err: unknown) {
         const e = err as { name?: string };
-        // Fallback: If exact deviceId constraint triggered OverconstrainedError, retry with ideal constraint
-        if (e.name === "OverconstrainedError" && deviceId) {
-          console.warn("[CameraService] OverconstrainedError with exact deviceId. Retrying with ideal deviceId constraint...");
+        // Fallback: If exact deviceId / frameRate overconstrained, retry with ideal constraints
+        if (e.name === "OverconstrainedError" && resolvedDeviceId) {
+          console.warn(
+            "[CameraService] OverconstrainedError. Retrying with ideal deviceId + ideal 30 FPS..."
+          );
           stream = await navigator.mediaDevices.getUserMedia({
-            video: { deviceId: { ideal: deviceId } },
+            video: {
+              deviceId: { ideal: resolvedDeviceId },
+              frameRate: { ideal: TARGET_CAMERA_FPS },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+            audio: false,
+          });
+        } else if (e.name === "OverconstrainedError") {
+          console.warn("[CameraService] OverconstrainedError. Retrying with minimal video constraints...");
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: resolvedDeviceId
+              ? { deviceId: { ideal: resolvedDeviceId }, frameRate: { ideal: TARGET_CAMERA_FPS } }
+              : { facingMode: "user", frameRate: { ideal: TARGET_CAMERA_FPS } },
             audio: false,
           });
         } else {

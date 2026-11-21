@@ -18,6 +18,7 @@ import {
 } from "../../types/vision";
 import { BlinkDetector } from "./BlinkDetector";
 import { CameraService, isRealSenseRgbLabel, isLenovoCameraLabel } from "./CameraService";
+import { PoseLandmarkStabilizer, LandmarkLike } from "./poseLandmarkStabilizer";
 
 /**
  * VisionEngine
@@ -57,6 +58,9 @@ export class VisionEngine {
   // Overlay & Display configuration
   public showSkeletonOverlay = true;
   private isMirrored = true;
+
+  /** Temporal L/R lock + One-Euro smoothing (Tasks API has no built-in smoothLandmarks) */
+  private poseStabilizer = new PoseLandmarkStabilizer();
 
   // State callback
   private stateListener: ((state: VisionState) => void) | null = null;
@@ -181,30 +185,41 @@ export class VisionEngine {
         modelLoadingMessage: "Loading Pose Landmark & Biomechanical Model...",
       });
 
-      // 2. Initialize Pose Landmarker
-      try {
-        this.poseLandmarker = await PoseLandmarker.createFromOptions(visionFileset, {
-          baseOptions: {
-            modelAssetPath: "./models/pose_landmarker_lite.task",
-            delegate: "GPU",
-          },
-          runningMode: "VIDEO",
-          numPoses: 1,
-          minPoseDetectionConfidence: 0.5,
-          minPosePresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-        });
-      } catch (poseErr) {
-        console.warn("Local Pose model failed, falling back to Google CDN:", poseErr);
-        this.poseLandmarker = await PoseLandmarker.createFromOptions(visionFileset, {
-          baseOptions: {
-            modelAssetPath:
-              "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-            delegate: "GPU",
-          },
-          runningMode: "VIDEO",
-          numPoses: 1,
-        });
+      // 2. Initialize Pose Landmarker — prefer FULL over LITE for far full-body stability
+      const poseOptionsBase = {
+        runningMode: "VIDEO" as const,
+        numPoses: 1,
+        minPoseDetectionConfidence: 0.55,
+        minPosePresenceConfidence: 0.55,
+        minTrackingConfidence: 0.55,
+      };
+      const poseModelCandidates = [
+        "./models/pose_landmarker_full.task",
+        "./models/pose_landmarker_lite.task",
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+      ];
+      let poseLoaded = false;
+      let lastPoseErr: unknown = null;
+      for (const modelAssetPath of poseModelCandidates) {
+        try {
+          this.poseLandmarker = await PoseLandmarker.createFromOptions(visionFileset, {
+            baseOptions: {
+              modelAssetPath,
+              delegate: "GPU",
+            },
+            ...poseOptionsBase,
+          });
+          console.log(`[VisionEngine] Pose model loaded: ${modelAssetPath}`);
+          poseLoaded = true;
+          break;
+        } catch (poseErr) {
+          lastPoseErr = poseErr;
+          console.warn(`[VisionEngine] Pose model failed (${modelAssetPath}):`, poseErr);
+        }
+      }
+      if (!poseLoaded || !this.poseLandmarker) {
+        throw lastPoseErr || new Error("Failed to load any Pose Landmarker model");
       }
 
       this.updateState({
@@ -280,8 +295,21 @@ export class VisionEngine {
       return false;
     }
 
-    // Determine target device
-    const targetDeviceId = deviceId || this.currentState.selectedCameraId || undefined;
+    // Determine target device — prefer RealSense RGB; avoid sticky Virtual Camera selection
+    const selectedId = this.currentState.selectedCameraId || undefined;
+    const selectedDev = selectedId
+      ? this.currentState.availableCameras.find((c) => c.deviceId === selectedId)
+      : undefined;
+    const realSenseDev = this.currentState.availableCameras.find((c) => c.isRealSenseRgb);
+    const selectedLooksVirtual = Boolean(
+      selectedDev?.label && /virtual|obs|manycam|snap camera/i.test(selectedDev.label)
+    );
+    const targetDeviceId =
+      deviceId ||
+      (selectedLooksVirtual && realSenseDev ? realSenseDev.deviceId : undefined) ||
+      selectedId ||
+      realSenseDev?.deviceId ||
+      undefined;
     const targetDev = this.currentState.availableCameras.find((c) => c.deviceId === targetDeviceId);
     const isTargetingRealSense =
       deviceId === "realsense-rgb" ||
@@ -488,6 +516,7 @@ export class VisionEngine {
 
     this.cameraService.stopCamera();
     this.blinkDetector.reset();
+    this.poseStabilizer.reset();
     this.singleLegHoldStartTime = null;
     this.lastLiftedLeg = "NONE";
 
@@ -585,21 +614,33 @@ export class VisionEngine {
         now
       );
 
+      // 2b. Stabilize landmarks (L/R lock + One-Euro) — critical when patient stands far
+      const rawLm = poseResult.landmarks?.[0] as LandmarkLike[] | undefined;
+      const stableLm = this.poseStabilizer.stabilize(rawLm, now);
+      const stabilizedPoseResult: PoseLandmarkerResult = stableLm
+        ? ({
+            ...poseResult,
+            landmarks: [stableLm as PoseLandmarkerResult["landmarks"][0]],
+          } as PoseLandmarkerResult)
+        : poseResult;
+
       // 3. Run Face Landmarker inference (with blendshapes and 468 mesh landmarks)
       const faceResult: FaceLandmarkerResult = this.faceLandmarker.detectForVideo(
         this.videoElement,
         now
       );
 
-      // 4. Normalize Pose Landmarks & Compute Biomechanics
-      const normalizedPose = this.extractNormalizedPose(poseResult, now);
+      // 4. Normalize Pose Landmarks & Compute Biomechanics (from stabilized landmarks)
+      const normalizedPose = stableLm
+        ? this.extractNormalizedPose(stabilizedPoseResult, now)
+        : null;
 
       // 5. Compute Mathematical EAR & Extract Eye Blendshapes
       const faceData = this.extractFaceAndEyeData(faceResult, now);
 
-      // 6. Render Canvas Overlay with Medical Aesthetics
+      // 6. Render Canvas Overlay with Medical Aesthetics (stabilized skeleton)
       if (this.canvasElement && this.videoElement) {
-        this.renderCanvasOverlay(poseResult, faceResult, normalizedPose, faceData);
+        this.renderCanvasOverlay(stabilizedPoseResult, faceResult, normalizedPose, faceData);
       }
 
       // 7. Update vision state
@@ -610,6 +651,8 @@ export class VisionEngine {
 
       this.updateState({
         fps: this.currentFps,
+        // Wall clock aligned with board HID timestamps (both Date.now / Utc millis domain)
+        frameTimestampMs: Date.now(),
         activeResolution: resStr,
         hasPose: normalizedPose !== null,
         pose: normalizedPose,
@@ -1049,6 +1092,17 @@ export class VisionEngine {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // Always paint the live camera frame onto the display canvas. In Tauri/WebView2,
+    // attaching the same MediaStream to a second <video> often stays black; compositing
+    // here keeps the exercise preview visible with the MediaPipe skeleton on top.
+    if (video.readyState >= 2) {
+      try {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      } catch {
+        // drawImage can throw briefly while the track renegotiates
+      }
+    }
+
     if (!this.showSkeletonOverlay) return;
 
     const w = canvas.width;
@@ -1094,7 +1148,7 @@ export class VisionEngine {
       for (const [from, to] of connections) {
         const p1 = lm[from];
         const p2 = lm[to];
-        if (p1 && p2 && (p1.visibility ?? 1) > 0.4 && (p2.visibility ?? 1) > 0.4) {
+        if (p1 && p2 && (p1.visibility ?? 1) > 0.5 && (p2.visibility ?? 1) > 0.5) {
           ctx.beginPath();
           ctx.moveTo(p1.x * w, p1.y * h);
           ctx.lineTo(p2.x * w, p2.y * h);
@@ -1124,7 +1178,7 @@ export class VisionEngine {
       const keyJoints = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
       for (const idx of keyJoints) {
         const p = lm[idx];
-        if (p && (p.visibility ?? 1) > 0.4) {
+        if (p && (p.visibility ?? 1) > 0.5) {
           const cx = p.x * w;
           const cy = p.y * h;
 

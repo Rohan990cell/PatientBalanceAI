@@ -821,6 +821,10 @@ export type DirectionalTargetName =
   | "SHIFT RIGHT"
   | "SHIFT FORWARD"
   | "SHIFT BACKWARD"
+  | "SHIFT FORWARD-RIGHT"
+  | "SHIFT FORWARD-LEFT"
+  | "SHIFT BACKWARD-RIGHT"
+  | "SHIFT BACKWARD-LEFT"
   | "RETURN TO CENTER";
 
 export interface DirectionalTarget {
@@ -846,10 +850,10 @@ export interface DirectionalTarget {
  * Ensures targets remain safely inside the support base to avoid loss of balance.
  */
 export const DIRECTIONAL_SAFE_BOUNDS = {
-  minX: -0.60,
-  maxX: 0.60,
-  minY: -0.50,
-  maxY: 0.50,
+  minX: -0.78,
+  maxX: 0.78,
+  minY: -0.60,
+  maxY: 0.60,
 } as const;
 
 /**
@@ -864,8 +868,12 @@ export const DIRECTIONAL_SAFE_BOUNDS = {
 export const DEFAULT_DIRECTIONAL_DURATIONS: Record<DirectionalTargetName, number> = {
   "SHIFT LEFT": 2,
   "SHIFT RIGHT": 3,
-  "SHIFT FORWARD": 1,
+  "SHIFT FORWARD": 2,
   "SHIFT BACKWARD": 2,
+  "SHIFT FORWARD-RIGHT": 2,
+  "SHIFT FORWARD-LEFT": 2,
+  "SHIFT BACKWARD-RIGHT": 2,
+  "SHIFT BACKWARD-LEFT": 2,
   "RETURN TO CENTER": 3,
 };
 
@@ -878,12 +886,17 @@ export const DEFAULT_DIRECTIONAL_DURATIONS: Record<DirectionalTargetName, number
  * vary by patient height, stance width, pathology, and foot size.
  */
 export const DEFAULT_PATIENT_TARGET_OFFSETS_MM = {
-  leftDistanceMm: 84.74, // ~0.38 normalized lateral
-  rightDistanceMm: 84.74, // ~0.38 normalized lateral
-  forwardDistanceMm: 38.08, // ~0.32 normalized anteroposterior
-  backwardDistanceMm: 38.08, // ~0.32 normalized anteroposterior
-  toleranceMm: 40.4, // ~0.16 normalized radial tolerance
+  /** Far lateral (~0.68 normalized) — near board edge */
+  leftDistanceMm: 151.64,
+  rightDistanceMm: 151.64,
+  /** Far anteroposterior (~0.52 normalized) — near board edge */
+  forwardDistanceMm: 61.88,
+  backwardDistanceMm: 61.88,
+  toleranceMm: 48.0, // ~0.215 normalized radial tolerance
 } as const;
+
+/** Seconds the patient must hold center stance before Target 1 begins */
+export const CENTER_START_HOLD_SECONDS = 3;
 
 /**
  * Configurable patient-specific directional assessment parameters.
@@ -1075,6 +1088,7 @@ export function getPatientCalibratedTargets(
   const disclaimer = config?.parameterClassification ??
     "Configurable Assessment Parameter (Non-Validated Clinical Limit)";
 
+  // Far layout: 4 corners + Forward + Backward + Center (7 targets), near board edges.
   const targetDefs: Array<{
     name: DirectionalTargetName;
     id: string;
@@ -1083,24 +1097,29 @@ export function getPatientCalibratedTargets(
     relXMm: number;
     relYMm: number;
     defaultHold: number;
+    instruction: (secWord: string) => string;
   }> = [
     {
-      name: "SHIFT LEFT",
-      id: "dir-target-1-left",
+      name: "SHIFT FORWARD-RIGHT",
+      id: "dir-target-1-fwd-right",
       stepNumber: 1,
-      shortLabel: "Left",
-      relXMm: -leftDist,
-      relYMm: 0.0,
+      shortLabel: "Fwd-Right",
+      relXMm: rightDist,
+      relYMm: fwdDist,
       defaultHold: 2,
+      instruction: (secWord) =>
+        `Shift your weight to the FRONT-RIGHT corner and hold for ${secWord}.`,
     },
     {
-      name: "SHIFT RIGHT",
-      id: "dir-target-2-right",
+      name: "SHIFT BACKWARD-LEFT",
+      id: "dir-target-2-back-left",
       stepNumber: 2,
-      shortLabel: "Right",
-      relXMm: rightDist,
-      relYMm: 0.0,
-      defaultHold: 3,
+      shortLabel: "Back-Left",
+      relXMm: -leftDist,
+      relYMm: -bwdDist,
+      defaultHold: 2,
+      instruction: (secWord) =>
+        `Shift your weight to the BACK-LEFT corner (opposite side) and hold for ${secWord}.`,
     },
     {
       name: "SHIFT FORWARD",
@@ -1109,7 +1128,9 @@ export function getPatientCalibratedTargets(
       shortLabel: "Forward",
       relXMm: 0.0,
       relYMm: fwdDist,
-      defaultHold: 1,
+      defaultHold: 2,
+      instruction: (secWord) =>
+        `Shift your weight fully FORWARD and hold for ${secWord}.`,
     },
     {
       name: "SHIFT BACKWARD",
@@ -1119,15 +1140,41 @@ export function getPatientCalibratedTargets(
       relXMm: 0.0,
       relYMm: -bwdDist,
       defaultHold: 2,
+      instruction: (secWord) =>
+        `Shift your weight fully BACKWARD and hold for ${secWord}.`,
+    },
+    {
+      name: "SHIFT FORWARD-LEFT",
+      id: "dir-target-5-fwd-left",
+      stepNumber: 5,
+      shortLabel: "Fwd-Left",
+      relXMm: -leftDist,
+      relYMm: fwdDist,
+      defaultHold: 2,
+      instruction: (secWord) =>
+        `Shift your weight to the FRONT-LEFT corner and hold for ${secWord}.`,
+    },
+    {
+      name: "SHIFT BACKWARD-RIGHT",
+      id: "dir-target-6-back-right",
+      stepNumber: 6,
+      shortLabel: "Back-Right",
+      relXMm: rightDist,
+      relYMm: -bwdDist,
+      defaultHold: 2,
+      instruction: (secWord) =>
+        `Shift your weight to the BACK-RIGHT corner (opposite side) and hold for ${secWord}.`,
     },
     {
       name: "RETURN TO CENTER",
-      id: "dir-target-5-center",
-      stepNumber: 5,
+      id: "dir-target-7-center",
+      stepNumber: 7,
       shortLabel: "Center",
       relXMm: 0.0,
       relYMm: 0.0,
       defaultHold: 3,
+      instruction: (secWord) =>
+        `Return your body weight to the center target and hold for ${secWord}.`,
     },
   ];
 
@@ -1136,26 +1183,7 @@ export function getPatientCalibratedTargets(
       ? Math.max(0.5, config.customDurations[def.name]!)
       : (DEFAULT_DIRECTIONAL_DURATIONS[def.name] ?? def.defaultHold);
 
-    let secWord = holdSec === 1 ? "1 second" : `${holdSec} seconds`;
-    let dynamicInstruction = "";
-    switch (def.name) {
-      case "SHIFT LEFT":
-        dynamicInstruction = `Move your body weight towards the left target and hold for ${secWord}.`;
-        break;
-      case "SHIFT RIGHT":
-        dynamicInstruction = `Move your body weight across to the right target and hold for ${secWord}.`;
-        break;
-      case "SHIFT FORWARD":
-        dynamicInstruction = `Move your body weight forward towards the front target and hold for ${secWord}.`;
-        break;
-      case "SHIFT BACKWARD":
-        dynamicInstruction = `Move your body weight backward towards the back target and hold for ${secWord}.`;
-        break;
-      case "RETURN TO CENTER":
-        dynamicInstruction = `Return your body weight to the center target and hold for ${secWord}.`;
-        break;
-    }
-
+    const secWord = holdSec === 1 ? "1 second" : `${holdSec} seconds`;
     const absTargetXMm = parseFloat((x0Mm + def.relXMm).toFixed(2));
     const absTargetYMm = parseFloat((y0Mm + def.relYMm).toFixed(2));
     const normX = parseFloat((def.relXMm / WII_BOARD_DIMENSIONS.halfDistanceXMm).toFixed(4));
@@ -1166,7 +1194,7 @@ export function getPatientCalibratedTargets(
       stepNumber: def.stepNumber,
       name: def.name,
       shortLabel: def.shortLabel,
-      instruction: dynamicInstruction,
+      instruction: def.instruction(secWord),
       x: normX,
       y: normY,
       targetXMm: absTargetXMm,
@@ -1208,6 +1236,77 @@ export function getDirectionalTargets(
     customDurations: customDurations ?? targetConfig?.customDurations,
   };
   return getPatientCalibratedTargets(baseline, mergedConfig);
+}
+
+/** Fisher–Yates shuffle (new array). */
+export function shuffleDirectionalTargets<T>(items: T[]): T[] {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = arr[i]!;
+    arr[i] = arr[j]!;
+    arr[j] = tmp;
+  }
+  return arr;
+}
+
+/**
+ * Far session sequence (7 targets):
+ * opposite corner pairs + Forward/Backward, then Center.
+ * Default: Fwd-Right → Back-Left → Forward → Backward → Fwd-Left → Back-Right → Center.
+ */
+export function getRandomizedFarDirectionalTargets(
+  customDurations?: Partial<Record<DirectionalTargetName, number>>,
+  baseline?: DirectionalCalibrationBaseline | null
+): DirectionalTarget[] {
+  const all = getDirectionalTargets(customDurations, undefined, baseline);
+  const byName = (name: DirectionalTargetName) => all.find((t) => t.name === name)!;
+  const center = byName("RETURN TO CENTER");
+
+  const cornerPairA = [byName("SHIFT FORWARD-RIGHT"), byName("SHIFT BACKWARD-LEFT")];
+  const axisPair = [byName("SHIFT FORWARD"), byName("SHIFT BACKWARD")];
+  const cornerPairB = [byName("SHIFT FORWARD-LEFT"), byName("SHIFT BACKWARD-RIGHT")];
+
+  const orient = <T,>(pair: T[]): T[] => (Math.random() < 0.2 ? [...pair].reverse() : pair);
+
+  const midPairs =
+    Math.random() < 0.5
+      ? [...orient(axisPair), ...orient(cornerPairB)]
+      : [...orient(cornerPairB), ...orient(axisPair)];
+
+  const ordered = [...orient(cornerPairA), ...midPairs, center];
+  return ordered.map((t, i) => ({
+    ...t,
+    stepNumber: i + 1,
+    id: `dir-target-${i + 1}-${t.shortLabel.toLowerCase().replace(/\s+/g, "-")}`,
+  }));
+}
+
+/** Synthetic center target used for the pre-start 3s center stance gate. */
+export function getCenterStartGateTarget(
+  baseline?: DirectionalCalibrationBaseline | null
+): DirectionalTarget {
+  const x0Mm = baseline && baseline.isCalibrated ? baseline.baselineX0Mm : 0;
+  const y0Mm = baseline && baseline.isCalibrated ? baseline.baselineY0Mm : 0;
+  const tolMm = 50.0;
+  const tolNorm = parseFloat((tolMm / WII_BOARD_DIMENSIONS.halfDistanceXMm).toFixed(3));
+  return {
+    id: "dir-center-start-gate",
+    stepNumber: 0,
+    name: "RETURN TO CENTER",
+    shortLabel: "Center",
+    instruction: `Stand naturally in the center of the board and hold for ${CENTER_START_HOLD_SECONDS} seconds to begin Target 1.`,
+    x: 0,
+    y: 0,
+    targetXMm: x0Mm,
+    targetYMm: y0Mm,
+    relTargetXMm: 0,
+    relTargetYMm: 0,
+    tolerance: tolNorm,
+    toleranceMm: tolMm,
+    requiredHoldDurationSeconds: CENTER_START_HOLD_SECONDS,
+    parameterClassification: "Pre-Start Center Stance Gate",
+  };
 }
 
 /**
@@ -1432,6 +1531,170 @@ export interface DirectionalSamplePoint {
 }
 
 /**
+ * One board+camera-synced frame from first border hit on a target through hold completion.
+ * Includes leave/re-enter frames after first contact (hold timer still requires a continuous hold).
+ *
+ * Per-frame error:
+ *   e = √( (x₁ − xₜ)² + (y₁ − yₜ)² )
+ * where (x₁,y₁) is the target center and (xₜ,yₜ) is this frame's COP.
+ */
+export interface HoldWindowFrameSample {
+  frameIndex: number;
+  /** Shared soft-sync wall clock used to pair board + camera at this tick */
+  syncTimestamp: number;
+  /** Session T0 when 3s center hold ended / Target 1 began (wall-clock ms) */
+  syncEpochMs: number | null;
+  boardTimestampMs: number | null;
+  visionTimestampMs: number | null;
+  /** boardTimestamp − syncEpoch (ms since session T0); null if either missing */
+  boardRelMs: number | null;
+  /** visionTimestamp − syncEpoch (ms since session T0); null if either missing */
+  visionRelMs: number | null;
+  /**
+   * ms since THIS target's first stored coordinate (first border hit).
+   * Same gate as coordinate storing — graph X-axis uses this.
+   */
+  holdRelMs: number | null;
+  /** |boardTimestamp − visionTimestamp| when both available */
+  timeSkewMs: number | null;
+  targetX: number;
+  targetY: number;
+  targetXMm: number;
+  targetYMm: number;
+  copX: number;
+  copY: number;
+  copXMm: number;
+  copYMm: number;
+  /** √((targetX − copX)² + (targetY − copY)²) in normalized COP space */
+  errorNorm: number;
+  /** √((targetXMm − copXMm)² + (targetYMm − copYMm)²) in millimetres */
+  errorMm: number;
+  /** Signed offset from target in mm: copXMm − targetXMm */
+  dxMm: number;
+  /** Signed offset from target in mm: copYMm − targetYMm */
+  dyMm: number;
+  /** True when COP was inside the target tolerance at this frame */
+  isInside: boolean;
+  weightKg: number | null;
+  hasPose: boolean;
+  visionFps: number | null;
+}
+
+/** Per-target series of hold-window frame errors (first border hit → hold complete). */
+export interface HoldWindowErrorSeries {
+  targetId: string;
+  stepNumber: number;
+  targetName: DirectionalTargetName;
+  shortLabel: string;
+  requiredHoldDurationSeconds: number;
+  sampleCount: number;
+  samples: HoldWindowFrameSample[];
+  /** First frameIndex of the trailing continuous inside streak (final successful hold) */
+  finalHoldStartFrameIndex: number | null;
+  /** Last frameIndex of the final successful hold (usually last sample) */
+  finalHoldEndFrameIndex: number | null;
+  meanErrorNorm: number | null;
+  rmsErrorNorm: number | null;
+  minErrorNorm: number | null;
+  maxErrorNorm: number | null;
+  meanErrorMm: number | null;
+  rmsErrorMm: number | null;
+  minErrorMm: number | null;
+  maxErrorMm: number | null;
+}
+
+/** Trailing continuous inside streak = the final successful hold window. */
+export function findFinalHoldFrameRange(
+  samples: HoldWindowFrameSample[]
+): { startFrameIndex: number | null; endFrameIndex: number | null } {
+  if (!samples.length) return { startFrameIndex: null, endFrameIndex: null };
+  let i = samples.length - 1;
+  if (!samples[i].isInside) {
+    // Should not happen on a completed hold, but stay safe
+    while (i >= 0 && !samples[i].isInside) i--;
+    if (i < 0) return { startFrameIndex: null, endFrameIndex: null };
+  }
+  const endFrameIndex = samples[i].frameIndex;
+  while (i >= 0 && samples[i].isInside) i--;
+  const startFrameIndex = samples[i + 1].frameIndex;
+  return { startFrameIndex, endFrameIndex };
+}
+
+/** Euclidean error between target center and a COP sample (normalized + mm). */
+export function computeHoldFrameTargetError(
+  targetX: number,
+  targetY: number,
+  copX: number,
+  copY: number
+): { errorNorm: number; errorMm: number; copXMm: number; copYMm: number; targetXMm: number; targetYMm: number } {
+  const targetXMm = targetX * WII_BOARD_DIMENSIONS.halfDistanceXMm;
+  const targetYMm = targetY * WII_BOARD_DIMENSIONS.halfDistanceYMm;
+  const copXMm = copX * WII_BOARD_DIMENSIONS.halfDistanceXMm;
+  const copYMm = copY * WII_BOARD_DIMENSIONS.halfDistanceYMm;
+  const errorNorm = Math.hypot(targetX - copX, targetY - copY);
+  const errorMm = Math.hypot(targetXMm - copXMm, targetYMm - copYMm);
+  return {
+    errorNorm: parseFloat(errorNorm.toFixed(6)),
+    errorMm: parseFloat(errorMm.toFixed(3)),
+    copXMm: parseFloat(copXMm.toFixed(2)),
+    copYMm: parseFloat(copYMm.toFixed(2)),
+    targetXMm: parseFloat(targetXMm.toFixed(2)),
+    targetYMm: parseFloat(targetYMm.toFixed(2)),
+  };
+}
+
+export function buildHoldWindowErrorSeries(params: {
+  targetId: string;
+  stepNumber: number;
+  targetName: DirectionalTargetName;
+  shortLabel: string;
+  requiredHoldDurationSeconds: number;
+  samples: HoldWindowFrameSample[];
+}): HoldWindowErrorSeries {
+  const samples = params.samples;
+  const N = samples.length;
+  const finalHold = findFinalHoldFrameRange(samples);
+  if (N === 0) {
+    return {
+      ...params,
+      sampleCount: 0,
+      finalHoldStartFrameIndex: null,
+      finalHoldEndFrameIndex: null,
+      meanErrorNorm: null,
+      rmsErrorNorm: null,
+      minErrorNorm: null,
+      maxErrorNorm: null,
+      meanErrorMm: null,
+      rmsErrorMm: null,
+      minErrorMm: null,
+      maxErrorMm: null,
+    };
+  }
+
+  const norms = samples.map((s) => s.errorNorm);
+  const mms = samples.map((s) => s.errorMm);
+  const meanNorm = norms.reduce((a, b) => a + b, 0) / N;
+  const meanMm = mms.reduce((a, b) => a + b, 0) / N;
+  const rmsNorm = Math.sqrt(norms.reduce((a, b) => a + b * b, 0) / N);
+  const rmsMm = Math.sqrt(mms.reduce((a, b) => a + b * b, 0) / N);
+
+  return {
+    ...params,
+    sampleCount: N,
+    finalHoldStartFrameIndex: finalHold.startFrameIndex,
+    finalHoldEndFrameIndex: finalHold.endFrameIndex,
+    meanErrorNorm: parseFloat(meanNorm.toFixed(6)),
+    rmsErrorNorm: parseFloat(rmsNorm.toFixed(6)),
+    minErrorNorm: parseFloat(Math.min(...norms).toFixed(6)),
+    maxErrorNorm: parseFloat(Math.max(...norms).toFixed(6)),
+    meanErrorMm: parseFloat(meanMm.toFixed(2)),
+    rmsErrorMm: parseFloat(rmsMm.toFixed(2)),
+    minErrorMm: parseFloat(Math.min(...mms).toFixed(2)),
+    maxErrorMm: parseFloat(Math.max(...mms).toFixed(2)),
+  };
+}
+
+/**
  * Coordinate error statistics computed from measured physical COP coordinates (mm)
  * according to the professor's handwritten COP coordinate calculation method.
  */
@@ -1524,8 +1787,8 @@ export function calculateCoordinateErrorMetrics(
     const distMm = Math.hypot(xMm - targetXMm, yMm - targetYMm);
     validDistances.push(distMm);
 
-    const isInside = s.isInside !== undefined ? s.isInside : distMm <= toleranceMm;
-    if (isInside) {
+    // Strict physical zone only — do not reuse tracker jitter `isInside` flags
+    if (distMm <= toleranceMm) {
       insideCount++;
     }
   }
@@ -1541,7 +1804,8 @@ export function calculateCoordinateErrorMetrics(
       meanDistanceErrorMm: 0,
       sdDistanceErrorMm: 0,
       rmsDistanceErrorMm: 0,
-      minDistanceErrorMm: 0,
+      // Sentinel so empty data never reads as "perfect hit" (0 mm)
+      minDistanceErrorMm: Number.POSITIVE_INFINITY,
       maxDistanceErrorMm: 0,
       samplesInTargetZoneCount: 0,
       samplesInTargetZonePercentage: 0,
@@ -1716,6 +1980,13 @@ export interface DirectionalTargetAssessment {
 
   // Samples
   samples: DirectionalSamplePoint[];
+
+  /**
+   * Board+camera-synced frames captured only while inside the target border
+   * during the successful continuous hold that completed this target.
+   */
+  holdWindowFrameSamples?: HoldWindowFrameSample[];
+  holdWindowErrorSeries?: HoldWindowErrorSeries | null;
 }
 
 export interface DirectionalWeightShiftSessionSummary {
@@ -1775,10 +2046,22 @@ export interface DirectionalWeightShiftSessionSummary {
   // Target assessments
   targets: DirectionalTargetAssessment[];
 
+  /**
+   * Per-target hold-window frame error series (inside border only, until hold complete).
+   * Mirrors data also attached onto each DirectionalTargetAssessment.
+   */
+  holdWindowErrorSeries?: HoldWindowErrorSeries[];
+
   // Patient Neutral Baseline Calibration
   calibrationBaseline?: DirectionalCalibrationBaseline;
   isBaselineCalibrated?: boolean;
   parameterClassification?: string;
+
+  /**
+   * Shared multimodal clock epoch (wall-clock ms) stamped when the 3s center
+   * hold ends and Target 1 begins. All hold-frame relative times use this T0.
+   */
+  multimodalSyncEpochMs?: number | null;
 }
 
 export function createInitialTargetAssessment(
@@ -1882,6 +2165,8 @@ export function createInitialTargetAssessment(
     validSamplePercentage: 0,
 
     samples: [],
+    holdWindowFrameSamples: [],
+    holdWindowErrorSeries: null,
   };
 }
 
@@ -1929,19 +2214,16 @@ export class DirectionalTargetTracker {
   } {
     const requiredHoldMs = Math.round(this.assessment.requiredHoldDurationSeconds * 1000);
 
-    // Check if telemetry is valid and connected
-    const isValid =
-      isConnected &&
+    // Valid when connected with a finite COP. Do not hard-block on the 10kg standing
+    // gate — that previously froze hold progress when tare/calibration under-reported weight.
+    const hasCop =
       copX !== null &&
       copX !== undefined &&
       !isNaN(copX) &&
       copY !== null &&
       copY !== undefined &&
-      !isNaN(copY) &&
-      totalWeight !== null &&
-      totalWeight !== undefined &&
-      !isNaN(totalWeight) &&
-      totalWeight >= 10.0; // Clinical standing threshold: plate is unloaded (< 10kg)
+      !isNaN(copY);
+    const isValid = Boolean(isConnected && hasCop);
 
     if (!isValid) {
       // Disconnected or invalid packet
@@ -2185,16 +2467,22 @@ export function finalizeTargetAssessment(assessment: DirectionalTargetAssessment
   result.meanDistanceErrorMm = coordMetrics.meanDistanceErrorMm;
   result.sdDistanceErrorMm = coordMetrics.sdDistanceErrorMm;
   result.rmsDistanceErrorMm = coordMetrics.rmsDistanceErrorMm;
-  result.minDistanceErrorMm = coordMetrics.minDistanceErrorMm;
-  result.maxDistanceErrorMm = coordMetrics.maxDistanceErrorMm;
+  result.minDistanceErrorMm =
+    coordMetrics.validSampleCount > 0 && Number.isFinite(coordMetrics.minDistanceErrorMm)
+      ? coordMetrics.minDistanceErrorMm
+      : null;
+  result.maxDistanceErrorMm =
+    coordMetrics.validSampleCount > 0 ? coordMetrics.maxDistanceErrorMm : null;
   result.configuredCoordinateSampleCount = coordMetrics.configuredSampleCount;
 
   // Phase 4 Objective Coordinate Measurements
   result.coordinateHitRatePercentage = coordMetrics.samplesInTargetZonePercentage;
   result.pathLengthMm = calculateCopPathLengthMm(result.samples);
   result.isTargetReached =
-    (coordMetrics.minDistanceErrorMm <= result.toleranceMm && coordMetrics.validSampleCount > 0) ||
-    coordMetrics.samplesInTargetZoneCount > 0;
+    coordMetrics.validSampleCount > 0 &&
+    (coordMetrics.samplesInTargetZoneCount > 0 ||
+      (Number.isFinite(coordMetrics.minDistanceErrorMm) &&
+        coordMetrics.minDistanceErrorMm <= result.toleranceMm));
 
   // Actual Centroid COP coordinates (in mm)
   if (result.samples.length > 0) {

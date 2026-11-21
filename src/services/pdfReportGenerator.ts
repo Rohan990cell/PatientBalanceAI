@@ -1,7 +1,18 @@
 import { jsPDF } from "jspdf";
 import { BalanceSession, RecordedMeasurementPoint } from "../types/session";
-import { DirectionalWeightShiftSessionSummary, DirectionalTargetAssessment } from "../utils/directionalWeightShiftExercise";
+import {
+  DirectionalWeightShiftSessionSummary,
+  DirectionalTargetAssessment,
+  HoldWindowErrorSeries,
+} from "../utils/directionalWeightShiftExercise";
 import { LegRaiseSessionSummary } from "../utils/multimodalLegRaiseExercise";
+import {
+  Pose2DAngleSessionReport,
+  POSE_2D_ANGLE_METRIC_KEYS,
+  POSE_2D_ANGLE_METRIC_LABELS,
+  formatAngleDeg,
+  formatDeltaDeg,
+} from "../utils/pose2dAngles";
 
 export interface PdfGenerationResult {
   filename: string;
@@ -884,7 +895,10 @@ export class PdfReportGenerator {
   // =========================================================================
   // DIRECTIONAL WEIGHT SHIFT ASSESSMENT REPORT (PHASE D)
   // =========================================================================
-  public static generateDirectionalWeightShiftReport(summary: DirectionalWeightShiftSessionSummary): jsPDF {
+  public static generateDirectionalWeightShiftReport(
+    summary: DirectionalWeightShiftSessionSummary,
+    angleReport?: Pose2DAngleSessionReport | null
+  ): jsPDF {
     const doc = new jsPDF({
       orientation: "portrait",
       unit: "mm",
@@ -892,7 +906,16 @@ export class PdfReportGenerator {
     });
 
     const isSimulated = !summary.isRealHardware;
-    const totalPages = 3;
+    const hasAngles = Boolean(angleReport && angleReport.snapshots.length > 0);
+    const holdSeries = (summary.holdWindowErrorSeries ?? []).filter((s) => s.sampleCount > 0);
+    const holdFrameRows = holdSeries.reduce((n, s) => n + s.sampleCount, 0);
+    const holdPages = holdSeries.length > 0 ? 1 + Math.max(1, Math.ceil(holdFrameRows / 30)) : 0;
+    // Pages 1–3 board report; + angles; + hold-window frame errors
+    const totalPages =
+      3 +
+      (hasAngles ? 1 : 0) +
+      (hasAngles && angleReport!.transitions.length > 0 ? 1 : 0) +
+      holdPages;
 
     // =========================================================================
     // PAGE 1: Header, Protocol, 5-Direction Summary Table, Definitions
@@ -957,7 +980,14 @@ export class PdfReportGenerator {
     doc.text(`Active Duration: ${summary.totalDurationSeconds.toFixed(1)} seconds`, 108, y + 16);
     const completionPct = Math.round((summary.completedTargetsCount / summary.totalTargetsCount) * 100);
     doc.text(`Targets Completed: ${summary.completedTargetsCount} of ${summary.totalTargetsCount} (${completionPct}%)`, 108, y + 21);
-    doc.text(`Hardware Model: ${summary.hardwareModel} | 4-Load-Cell Platform`, 108, y + 26);
+    const syncEpoch = summary.multimodalSyncEpochMs;
+    doc.text(
+      syncEpoch
+        ? `Shared Sync T0: ${new Date(syncEpoch).toLocaleTimeString()} (Target 1 start)`
+        : `Hardware Model: ${summary.hardwareModel} | 4-Load-Cell Platform`,
+      108,
+      y + 26
+    );
 
     y += 33;
 
@@ -1110,7 +1140,394 @@ export class PdfReportGenerator {
 
     this.renderDirectionalFooter(doc, 3, totalPages, summary);
 
+    // =========================================================================
+    // PAGE 4+: Board-synced 2D joint angles (absolute + consecutive changes)
+    // =========================================================================
+    if (hasAngles && angleReport) {
+      this.appendPose2DAngleReportPages(doc, summary, angleReport, isSimulated, totalPages);
+    }
+
+    // =========================================================================
+    // Hold-window per-frame errors (inside border only → hold complete)
+    // =========================================================================
+    if (holdSeries.length > 0) {
+      this.appendHoldWindowErrorPages(doc, summary, holdSeries, isSimulated, totalPages);
+    }
+
     return doc;
+  }
+
+  /**
+   * Append PDF pages for per-frame target errors collected only while COP is
+   * inside each target border during the successful continuous hold.
+   * e = √((x₁ − xₜ)² + (y₁ − yₜ)²)
+   */
+  private static appendHoldWindowErrorPages(
+    doc: jsPDF,
+    summary: DirectionalWeightShiftSessionSummary,
+    holdSeries: HoldWindowErrorSeries[],
+    isSimulated: boolean,
+    totalPages: number
+  ): void {
+    doc.addPage();
+    let pageNum = doc.getNumberOfPages();
+    this.renderDirectionalHeader(doc, pageNum, isSimulated);
+    let y = 30;
+
+    this.renderSectionHeader(doc, "12. PER-FRAME TARGET ERROR DURING HOLD (BORDER HIT → HOLD COMPLETE)", y);
+    y += 6;
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(51, 65, 85);
+    const syncEpochLabel = summary.multimodalSyncEpochMs
+      ? new Date(summary.multimodalSyncEpochMs).toLocaleTimeString()
+      : "--";
+    doc.text(
+      "Recording starts on the first border hit and continues through leave/re-enter until the continuous hold completes. " +
+        "Per-frame error: e = sqrt((x1 - xt)^2 + (y1 - yt)^2). Approach travel before first border hit is excluded.\n" +
+        "hold_t = ms since that target's first stored coordinate (graph X; same gate as COP store). " +
+        `Session sync T0 = ${syncEpochLabel} (3s center hold end / Target 1). ` +
+        "board_t / cam_t = ms since session T0; skew_ms = |board - camera|.",
+      16,
+      y,
+      { maxWidth: 178, lineHeightFactor: 1.3 }
+    );
+    y += 14;
+
+    // Summary table
+    const sumHeaders = ["Target", "Frames", "Mean e (mm)", "RMS e (mm)", "Min e", "Max e"];
+    const sumColW = [48, 20, 28, 28, 27, 27];
+    const startX = 16;
+
+    doc.setFillColor(240, 253, 250);
+    doc.rect(startX, y, 178, 7, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(7);
+    doc.setTextColor(15, 118, 110);
+    let x = startX + 1;
+    sumHeaders.forEach((h, i) => {
+      doc.text(h, x, y + 4.5);
+      x += sumColW[i];
+    });
+    y += 7;
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7);
+    doc.setTextColor(15, 23, 42);
+    for (const s of holdSeries) {
+      if (y > 270) {
+        this.renderDirectionalFooter(doc, pageNum, totalPages, summary);
+        doc.addPage();
+        pageNum = doc.getNumberOfPages();
+        this.renderDirectionalHeader(doc, pageNum, isSimulated);
+        y = 30;
+      }
+      const row = [
+        `T${s.stepNumber} ${s.shortLabel}`,
+        String(s.sampleCount),
+        s.meanErrorMm !== null ? s.meanErrorMm.toFixed(2) : "--",
+        s.rmsErrorMm !== null ? s.rmsErrorMm.toFixed(2) : "--",
+        s.minErrorMm !== null ? s.minErrorMm.toFixed(2) : "--",
+        s.maxErrorMm !== null ? s.maxErrorMm.toFixed(2) : "--",
+      ];
+      x = startX + 1;
+      doc.setDrawColor(226, 232, 240);
+      doc.line(startX, y + 6.2, startX + 178, y + 6.2);
+      row.forEach((cell, i) => {
+        doc.text(String(cell).slice(0, i === 0 ? 22 : 10), x, y + 4.5);
+        x += sumColW[i];
+      });
+      y += 6.5;
+    }
+
+    this.renderDirectionalFooter(doc, pageNum, totalPages, summary);
+
+    // Frame detail pages
+    for (const series of holdSeries) {
+      doc.addPage();
+      pageNum = doc.getNumberOfPages();
+      this.renderDirectionalHeader(doc, pageNum, isSimulated);
+      y = 30;
+
+      this.renderSectionHeader(
+        doc,
+        `12.${series.stepNumber} FRAME ERRORS — T${series.stepNumber} ${series.shortLabel}`,
+        y
+      );
+      y += 6;
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7);
+      doc.setTextColor(71, 85, 105);
+      doc.text(
+        `Target (x1,y1)=(${series.samples[0]?.targetX.toFixed(3) ?? "--"}, ${series.samples[0]?.targetY.toFixed(3) ?? "--"}) · ` +
+          `${series.sampleCount} frames · hold ${series.requiredHoldDurationSeconds}s`,
+        16,
+        y
+      );
+      y += 7;
+
+      const frameHeaders = ["#", "xt", "yt", "e_mm", "hold_t", "board_t", "cam_t", "skew"];
+      const frameColW = [12, 22, 22, 22, 24, 26, 26, 24];
+
+      const drawFrameHeader = () => {
+        doc.setFillColor(240, 253, 250);
+        doc.rect(startX, y, 178, 6.5, "F");
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(6.5);
+        doc.setTextColor(15, 118, 110);
+        let hx = startX + 1;
+        frameHeaders.forEach((h, i) => {
+          doc.text(h, hx, y + 4.2);
+          hx += frameColW[i];
+        });
+        y += 6.5;
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(6.5);
+        doc.setTextColor(15, 23, 42);
+      };
+
+      drawFrameHeader();
+
+      for (const f of series.samples) {
+        if (y > 275) {
+          this.renderDirectionalFooter(doc, pageNum, totalPages, summary);
+          doc.addPage();
+          pageNum = doc.getNumberOfPages();
+          this.renderDirectionalHeader(doc, pageNum, isSimulated);
+          y = 30;
+          drawFrameHeader();
+        }
+        const row = [
+          String(f.frameIndex),
+          f.copX.toFixed(3),
+          f.copY.toFixed(3),
+          f.errorMm.toFixed(2),
+          f.holdRelMs !== null && f.holdRelMs !== undefined ? String(f.holdRelMs) : "--",
+          f.boardRelMs !== null && f.boardRelMs !== undefined ? String(f.boardRelMs) : "--",
+          f.visionRelMs !== null && f.visionRelMs !== undefined ? String(f.visionRelMs) : "--",
+          f.timeSkewMs !== null ? String(f.timeSkewMs) : "--",
+        ];
+        let fx = startX + 1;
+        doc.setDrawColor(241, 245, 249);
+        doc.line(startX, y + 5.5, startX + 178, y + 5.5);
+        row.forEach((cell, i) => {
+          doc.text(cell, fx, y + 4);
+          fx += frameColW[i];
+        });
+        y += 5.5;
+      }
+
+      this.renderDirectionalFooter(doc, pageNum, totalPages, summary);
+    }
+  }
+
+  /**
+   * Append PDF pages for:
+   *  1) Joint angles at each board-synced target
+   *  2) Angle change between consecutive board targets
+   */
+  private static appendPose2DAngleReportPages(
+    doc: jsPDF,
+    summary: DirectionalWeightShiftSessionSummary,
+    angleReport: Pose2DAngleSessionReport,
+    isSimulated: boolean,
+    totalPages: number
+  ): void {
+    // —— Absolute angles table ——
+    doc.addPage();
+    let pageNum = 4;
+    this.renderDirectionalHeader(doc, pageNum, isSimulated);
+    let y = 30;
+
+    this.renderSectionHeader(doc, "10. BOARD-SYNCED 2D JOINT ANGLES AT EACH TARGET", y);
+    y += 6;
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(51, 65, 85);
+    doc.text(
+      `Snapshots taken at the same instant each board-target hold completes (COP inside target + patient load). ` +
+        `Angles are 2D image-plane only. Synced targets: ${angleReport.syncedTargetCount}/${angleReport.snapshots.length}.`,
+      16,
+      y,
+      { maxWidth: 178, lineHeightFactor: 1.3 }
+    );
+    y += 10;
+
+    // Compact table: Target | key joints (abbreviated)
+    const absHeaders = [
+      "Target",
+      "LSh",
+      "RSh",
+      "LEl",
+      "REl",
+      "LWr",
+      "RWr",
+      "LHp",
+      "RHp",
+      "LKn",
+      "RKn",
+      "LAn",
+      "RAn",
+      "Trnk",
+    ];
+    const colW = [28, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 12];
+    const startX = 16;
+
+    doc.setFillColor(240, 253, 250);
+    doc.rect(startX, y, 178, 7, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(6.5);
+    doc.setTextColor(15, 118, 110);
+    let x = startX + 1;
+    absHeaders.forEach((h, i) => {
+      doc.text(h, x, y + 4.5);
+      x += colW[i];
+    });
+    y += 7;
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(6.5);
+    doc.setTextColor(15, 23, 42);
+
+    for (const s of angleReport.snapshots) {
+      if (y > 270) {
+        this.renderDirectionalFooter(doc, pageNum, totalPages, summary);
+        doc.addPage();
+        pageNum += 1;
+        this.renderDirectionalHeader(doc, pageNum, isSimulated);
+        y = 30;
+      }
+      const label = `T${s.stepNumber || s.targetIndex + 1} ${s.shortLabel}`;
+      const vals = POSE_2D_ANGLE_METRIC_KEYS.map((k) => {
+        const v = s.angles[k] as number | null;
+        return formatAngleDeg(v).replace("°", "");
+      });
+      const row = [label, ...vals];
+      x = startX + 1;
+      doc.setDrawColor(226, 232, 240);
+      doc.line(startX, y + 6.2, startX + 178, y + 6.2);
+      row.forEach((cell, i) => {
+        doc.text(String(cell).slice(0, i === 0 ? 14 : 5), x, y + 4.5);
+        x += colW[i];
+      });
+      y += 6.5;
+    }
+
+    this.renderDirectionalFooter(doc, pageNum, totalPages, summary);
+
+    // —— Consecutive changes ——
+    if (angleReport.transitions.length === 0) return;
+
+    doc.addPage();
+    pageNum += 1;
+    this.renderDirectionalHeader(doc, pageNum, isSimulated);
+    y = 30;
+
+    this.renderSectionHeader(doc, "11. 2D ANGLE CHANGE BETWEEN CONSECUTIVE BOARD TARGETS", y);
+    y += 6;
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(51, 65, 85);
+    doc.text(
+      "Signed change from previous board target to next. Positive = increase; negative = decrease.",
+      16,
+      y,
+      { maxWidth: 178, lineHeightFactor: 1.3 }
+    );
+    y += 10;
+
+    const deltaHeaders = [
+      "Transition",
+      "ΔLSh",
+      "ΔRSh",
+      "ΔLEl",
+      "ΔREl",
+      "ΔLWr",
+      "ΔRWr",
+      "ΔLHp",
+      "ΔRHp",
+      "ΔLKn",
+      "ΔRKn",
+      "ΔLAn",
+      "ΔRAn",
+      "ΔTrk",
+    ];
+    const dColW = [32, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11];
+
+    doc.setFillColor(255, 251, 235);
+    doc.rect(startX, y, 178, 7, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(6.5);
+    doc.setTextColor(146, 64, 14);
+    x = startX + 1;
+    deltaHeaders.forEach((h, i) => {
+      doc.text(h, x, y + 4.5);
+      x += dColW[i];
+    });
+    y += 7;
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(6.5);
+    doc.setTextColor(15, 23, 42);
+
+    for (const tr of angleReport.transitions) {
+      if (y > 270) {
+        this.renderDirectionalFooter(doc, pageNum, totalPages, summary);
+        doc.addPage();
+        pageNum += 1;
+        this.renderDirectionalHeader(doc, pageNum, isSimulated);
+        y = 30;
+      }
+      const label = `T${tr.fromStep}→T${tr.toStep}`;
+      const vals = POSE_2D_ANGLE_METRIC_KEYS.map((k) =>
+        formatDeltaDeg(tr.deltas[k]).replace("°", "")
+      );
+      const row = [label, ...vals];
+      x = startX + 1;
+      doc.setDrawColor(226, 232, 240);
+      doc.line(startX, y + 6.2, startX + 178, y + 6.2);
+      row.forEach((cell, i) => {
+        doc.text(String(cell).slice(0, i === 0 ? 16 : 5), x, y + 4.5);
+        x += dColW[i];
+      });
+      // Sub-label with short names
+      doc.setFontSize(5.5);
+      doc.setTextColor(100, 116, 139);
+      doc.text(`${tr.fromLabel} → ${tr.toLabel}  (Δt ${(tr.dtMs / 1000).toFixed(1)}s)`, startX + 1, y + 9);
+      doc.setFontSize(6.5);
+      doc.setTextColor(15, 23, 42);
+      y += 11;
+    }
+
+    // Metric key legend
+    if (y > 250) {
+      this.renderDirectionalFooter(doc, pageNum, totalPages, summary);
+      doc.addPage();
+      pageNum += 1;
+      this.renderDirectionalHeader(doc, pageNum, isSimulated);
+      y = 30;
+    }
+    y += 4;
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(7);
+    doc.setTextColor(15, 118, 110);
+    doc.text("Metric key:", 16, y);
+    y += 4;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(6.5);
+    doc.setTextColor(71, 85, 105);
+    doc.text(
+      POSE_2D_ANGLE_METRIC_KEYS.map((k) => POSE_2D_ANGLE_METRIC_LABELS[k]).join(" · "),
+      16,
+      y,
+      { maxWidth: 178 }
+    );
+
+    this.renderDirectionalFooter(doc, pageNum, totalPages, summary);
   }
 
   // =========================================================================
