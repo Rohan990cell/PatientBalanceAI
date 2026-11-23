@@ -1,2 +1,2 @@
 [build]
-target-dir = "C:/Users/jayjo/.cargo/targets/patient-balance-ai"
+target-dir = "../node_modules/.cache/cargo-target"

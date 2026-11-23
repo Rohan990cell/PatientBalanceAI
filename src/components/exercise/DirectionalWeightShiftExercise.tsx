@@ -1763,9 +1763,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
 
     return () => {
       // Detach this exercise's canvas when leaving live phases (do not stop global camera mid-nav)
-      if (phase === "READY" || phase === "COMPLETED") {
-        setDisplayCanvas(null);
-      }
+      setDisplayCanvas(null);
     };
   }, [
     phase,

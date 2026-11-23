@@ -11,7 +11,8 @@ export type ExerciseId =
   | "posture-balance-multimodal"
   | "posture-alignment"
   | "directional-weight-shift"
-  | "multimodal-leg-raise-balance";
+  | "multimodal-leg-raise-balance"
+  | "target-achieving-game";
 
 export type ExerciseDifficulty = "Easy" | "Medium" | "Challenging";
 

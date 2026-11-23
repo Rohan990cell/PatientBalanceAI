@@ -15,6 +15,7 @@ import {
   Activity,
   Scale,
   Cpu,
+  Gamepad2,
 } from "lucide-react";
 import { RehabilitationScene } from "../components/avatar/RehabilitationScene";
 import { AvatarController } from "../components/avatar/AvatarController";
@@ -29,6 +30,7 @@ import { PostureBalanceMultimodalExercise } from "../components/exercise/Posture
 import { PostureAlignmentExercise } from "../components/exercise/PostureAlignmentExercise";
 import { DirectionalWeightShiftExercise } from "../components/exercise/DirectionalWeightShiftExercise";
 import { MultimodalLegRaiseExercise } from "../components/exercise/MultimodalLegRaiseExercise";
+import { TargetAchievingGameExercise } from "../components/exercise/TargetAchievingGameExercise";
 
 interface ExercisesPageProps {
   patient?: PatientProfile;
@@ -198,6 +200,31 @@ export const ExercisesPage: React.FC<ExercisesPageProps> = ({
   // ==========================================
   if (engineState.currentExercise?.id === "multimodal-leg-raise-balance") {
     return <MultimodalLegRaiseExercise patient={patient} onExit={returnToLibrary} />;
+  }
+
+  // ==========================================
+  // PHASE F: TARGET ACHIEVING GAME (WII BOARD ONLY GAMIFIED REHABILITATION)
+  // ==========================================
+  if (engineState.currentExercise?.id === "target-achieving-game") {
+    return (
+      <TargetAchievingGameExercise
+        patient={patient}
+        onExit={() => {
+          onResultFullScreenChange?.(false);
+          returnToLibrary();
+        }}
+        onResultFullScreenChange={onResultFullScreenChange}
+        onNavigateToDashboard={() => {
+          onResultFullScreenChange?.(false);
+          returnToLibrary();
+          if (onNavigateToDashboard) {
+            onNavigateToDashboard();
+          } else if (onBack) {
+            onBack();
+          }
+        }}
+      />
+    );
   }
 
   // ==========================================
@@ -765,6 +792,101 @@ export const ExercisesPage: React.FC<ExercisesPageProps> = ({
             >
               <Play size={14} fill="#FFFFFF" />
               <span>Launch Directional Shift</span>
+            </button>
+          </div>
+
+          {/* Exercise 5: Target Achieving Game */}
+          <div
+            className="medical-card"
+            style={{
+              padding: "14px 20px",
+              background: "linear-gradient(135deg, #FFFFFF 0%, #F5F3FF 100%)",
+              border: "1px solid #DDD6FE",
+              borderRadius: "14px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "16px",
+              flexWrap: "wrap",
+              boxShadow: "0 1px 3px rgba(15, 23, 42, 0.04)",
+              transition: "all 0.2s ease",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "14px", flex: "1 1 540px", minWidth: 0 }}>
+              <div
+                style={{
+                  width: "40px",
+                  height: "40px",
+                  borderRadius: "10px",
+                  background: "linear-gradient(135deg, #8B5CF6 0%, #6D28D9 100%)",
+                  color: "#FFFFFF",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                  boxShadow: "0 4px 10px -2px rgba(109, 40, 217, 0.35)",
+                }}
+              >
+                <Gamepad2 size={20} />
+              </div>
+              <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap", marginBottom: "3px" }}>
+                  <span
+                    style={{
+                      fontSize: "0.6875rem",
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.04em",
+                      color: "#6D28D9",
+                      background: "rgba(139, 92, 246, 0.12)",
+                      padding: "2px 7px",
+                      borderRadius: "5px",
+                    }}
+                  >
+                    Gamified Biofeedback • Board Only
+                  </span>
+                  <span
+                    style={{
+                      fontSize: "0.6875rem",
+                      fontWeight: 700,
+                      color: "#059669",
+                      background: "#ECFDF5",
+                      padding: "2px 7px",
+                      borderRadius: "5px",
+                      border: "1px solid #A7F3D0",
+                    }}
+                  >
+                    Camera Not Required
+                  </span>
+                </div>
+                <h3 style={{ fontSize: "1.0625rem", fontWeight: 700, color: "var(--text-main)", margin: "0 0 2px 0", letterSpacing: "-0.01em" }}>
+                  Target Achieving Game
+                </h3>
+                <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.4 }}>
+                  Move your body weight using the Wii Balance Board to reach and burst four floating balloons using your Center of Pressure (COP).
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => selectExercise("target-achieving-game")}
+              className="btn-primary"
+              style={{
+                padding: "8px 18px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px",
+                fontSize: "0.8125rem",
+                fontWeight: 700,
+                cursor: "pointer",
+                borderRadius: "8px",
+                flexShrink: 0,
+                whiteSpace: "nowrap",
+                background: "linear-gradient(135deg, #7C3AED 0%, #6D28D9 100%)",
+              }}
+            >
+              <Play size={14} fill="#FFFFFF" />
+              <span>Launch Target Achieving Game</span>
             </button>
           </div>
         </div>

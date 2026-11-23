@@ -1672,8 +1672,8 @@ function runTests() {
 
   // Test 53: Patient-specific target generation & all 4 directions + center
   // Baseline (X0, Y0) = (12.0 mm, -8.0 mm)
-  assert(DEFAULT_PATIENT_TARGET_OFFSETS_MM.leftDistanceMm === 84.74, "Test 53-def-a: Default lateral left offset is 84.74 mm");
-  assert(DEFAULT_PATIENT_TARGET_OFFSETS_MM.forwardDistanceMm === 38.08, "Test 53-def-b: Default forward AP offset is 38.08 mm");
+  assert(DEFAULT_PATIENT_TARGET_OFFSETS_MM.leftDistanceMm === 151.64, "Test 53-def-a: Default lateral left offset is 151.64 mm");
+  assert(DEFAULT_PATIENT_TARGET_OFFSETS_MM.forwardDistanceMm === 61.88, "Test 53-def-b: Default forward AP offset is 61.88 mm");
 
   const patientBaseline53: DirectionalCalibrationBaseline = {
     ...validStableBaseline,

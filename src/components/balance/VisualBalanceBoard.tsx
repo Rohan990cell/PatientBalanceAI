@@ -2,16 +2,18 @@ import React, { useMemo } from "react";
 import { BalanceBoardReading } from "../../types/hardware";
 import { mapCopToBoard } from "../../utils/copMapping";
 
-interface VisualBalanceBoardProps {
+export interface VisualBalanceBoardProps {
   reading: BalanceBoardReading | null;
   isConnected: boolean;
   isSimulated?: boolean;
+  children?: React.ReactNode;
 }
 
 export const VisualBalanceBoard: React.FC<VisualBalanceBoardProps> = ({
   reading,
   isConnected,
   isSimulated = false,
+  children,
 }) => {
   const hasLiveReading = Boolean(reading && (isConnected || isSimulated));
 
@@ -464,6 +466,9 @@ export const VisualBalanceBoard: React.FC<VisualBalanceBoardProps> = ({
                 Wii
               </span>
             </div>
+
+            {/* Target Overlays / Exercise Children (e.g. Balloon Targets) */}
+            {children}
 
             {/* ======================================================== */}
             {/* CENTER OF PRESSURE (COP) BALL                            */}

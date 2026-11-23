@@ -240,8 +240,8 @@ export function calculatePose2DAngles(
     pose.kneeFlexion && Number.isFinite(pose.kneeFlexion.rightKneeAngleDeg)
       ? interiorToFlexionDeg(pose.kneeFlexion.rightKneeAngleDeg)
       : null;
-  if (leftKneeDeg === null) leftKneeDeg = jointDeg(lh, lk, la);
-  if (rightKneeDeg === null) rightKneeDeg = jointDeg(rh, rk, ra);
+  if (leftKneeDeg === null) leftKneeDeg = jointFlexionDeg(lh, lk, la);
+  if (rightKneeDeg === null) rightKneeDeg = jointFlexionDeg(rh, rk, ra);
 
   const trunk = calculateTrunkSway2DDeg(pose);
 

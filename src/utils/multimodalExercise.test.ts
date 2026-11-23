@@ -147,6 +147,7 @@ if (rombergDef) {
     modelsLoaded: true,
     modelLoadingMessage: "",
     fps: 30,
+    frameTimestampMs: null,
     availableCameras: [],
     selectedCameraId: "cam-1",
     activeCameraLabel: "Webcam",

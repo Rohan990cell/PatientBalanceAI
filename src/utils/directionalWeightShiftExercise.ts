@@ -2329,8 +2329,8 @@ export class DirectionalTargetTracker {
     this.assessment.samples.push({
       timestamp,
       elapsedMs,
-      copX,
-      copY,
+      copX: copX!,
+      copY: copY!,
       copXMm: parseFloat(absCopXMm.toFixed(2)),
       copYMm: parseFloat(absCopYMm.toFixed(2)),
       relCopXMm: parseFloat(relCopXMm.toFixed(2)),
