@@ -1,11 +1,18 @@
 import { jsPDF } from "jspdf";
 import { BalanceSession, RecordedMeasurementPoint } from "../types/session";
+import { PatientProfile } from "../types/patient";
 import {
   DirectionalWeightShiftSessionSummary,
   DirectionalTargetAssessment,
   HoldWindowErrorSeries,
 } from "../utils/directionalWeightShiftExercise";
 import { LegRaiseSessionSummary } from "../utils/multimodalLegRaiseExercise";
+import {
+  GameSessionSummary,
+  TargetAttemptResult,
+  BALLOON_TARGET_SPECS,
+  DEFAULT_TARGET_TOLERANCE_MM,
+} from "../utils/targetAchievingGame";
 import {
   Pose2DAngleSessionReport,
   POSE_2D_ANGLE_METRIC_KEYS,
@@ -2733,6 +2740,726 @@ export class PdfReportGenerator {
         `${prefix}Data Quality: Observed ${summary.totalMissingDataSeconds.toFixed(1)}s of data latency or temporary sensor dropout during assessment.`
       );
     }
+
+    return list;
+  }
+
+  // =========================================================================
+  // TARGET ACHIEVING GAME CLINICAL REPORT GENERATION
+  // =========================================================================
+  public static generateTargetAchievingGameReport(
+    summary: GameSessionSummary,
+    patient?: PatientProfile,
+    sessionDate?: Date,
+    isRealHardware?: boolean
+  ): jsPDF {
+    const doc = new jsPDF({
+      orientation: "portrait",
+      unit: "mm",
+      format: "a4", // 210 x 297 mm
+    });
+
+    const isHardware = isRealHardware ?? summary.isRealHardware ?? true;
+    const isSimulated = !isHardware;
+    const totalPages = 2;
+    const dateObj = sessionDate ?? (summary.sessionDate ? new Date(summary.sessionDate) : new Date());
+
+    // =========================================================================
+    // PAGE 1: Header, Identification, Summary KPIs, Protocol, Target Table, Definitions
+    // =========================================================================
+    this.renderTargetGameHeader(doc, 1, isSimulated);
+    let y = 32;
+
+    // Hardware Badge / Simulation Banner
+    if (isSimulated) {
+      doc.setFillColor(254, 243, 199);
+      doc.setDrawColor(245, 158, 11);
+      doc.setLineWidth(0.6);
+      doc.roundedRect(16, y, 178, 12, 2, 2, "FD");
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9);
+      doc.setTextColor(180, 83, 9);
+      doc.text("DEVELOPMENT SIMULATION — NOT REAL SENSOR DATA", 22, y + 5.5);
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7.5);
+      doc.setTextColor(146, 64, 14);
+      doc.text("This report was generated without verified physical balance board telemetry and is non-diagnostic.", 22, y + 9.5);
+      y += 16;
+    } else {
+      doc.setFillColor(240, 253, 250);
+      doc.setDrawColor(13, 148, 136);
+      doc.setLineWidth(0.4);
+      doc.roundedRect(16, y, 178, 8.5, 2, 2, "FD");
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8);
+      doc.setTextColor(13, 148, 136);
+      doc.text("DATA SOURCE: NINTENDO WII BALANCE BOARD (MODEL RVL-WBC-01) — REAL HARDWARE TELEMETRY", 20, y + 5.5);
+      y += 12.5;
+    }
+
+    // Patient & Session Identification Grid
+    doc.setFillColor(248, 250, 252);
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.3);
+    doc.roundedRect(16, y, 178, 28, 2, 2, "FD");
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8);
+    doc.setTextColor(100, 116, 139);
+    doc.text("PATIENT IDENTIFICATION", 20, y + 5.5);
+    doc.text("GAME SESSION METADATA", 108, y + 5.5);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(15, 23, 42);
+
+    const patName = patient?.fullName || summary.patientName || "Unspecified";
+    const patId = patient?.medicalRecordNumber || patient?.id || summary.patientId || "N/A";
+    const condition = patient?.conditionDiagnosis || "Balance Rehabilitation";
+    const doctor = patient?.assignedDoctor || "Attending Physiotherapist";
+
+    // Left Col: Patient Info
+    doc.text(`Patient Name: ${patName}`, 20, y + 11);
+    doc.text(`Patient ID: ${patId}`, 20, y + 16);
+    doc.text(`Diagnosis: ${condition}`, 20, y + 21);
+    doc.text(`Clinician: ${doctor}`, 20, y + 26);
+
+    // Right Col: Session Info
+    doc.text(`Protocol: Target Achieving Game (4 Sequential Balloons)`, 108, y + 11);
+    const sessionDurationSec = (summary.totalSessionDurationMs / 1000).toFixed(1);
+    doc.text(`Active Duration: ${sessionDurationSec} seconds`, 108, y + 16);
+    doc.text(`Session Date: ${dateObj.toLocaleDateString()} ${dateObj.toLocaleTimeString()}`, 108, y + 21);
+    const sessionId = summary.sessionId || `game_${dateObj.getTime()}`;
+    doc.text(`Session ID: ${sessionId}`, 108, y + 26);
+
+    y += 33;
+
+    // Executive Summary KPI Cards (4 cards)
+    const cardW = 41.5;
+    const cardH = 18;
+    const cardGap = 4;
+    const startCardX = 16;
+
+    const cards = [
+      { label: "TOTAL TARGETS", val: `${summary.totalTargets}`, sub: "Prescribed count", color: [15, 23, 42] },
+      {
+        label: "COMPLETED",
+        val: `${summary.completedTargets} / ${summary.totalTargets}`,
+        sub: `${summary.missedTargets} missed`,
+        color: summary.completedTargets >= 3 ? [5, 150, 105] : [217, 119, 6],
+      },
+      {
+        label: "ACHIEVEMENT RATE",
+        val: `${summary.achievementPercentage.toFixed(0)}%`,
+        sub: summary.achievementPercentage >= 75 ? "Optimal Shift" : "Needs Practice",
+        color: summary.achievementPercentage >= 75 ? [13, 148, 136] : [220, 38, 38],
+      },
+      {
+        label: "AVG ACHIEVEMENT TIME",
+        val: summary.averageAchievementTimeMs !== null ? `${(summary.averageAchievementTimeMs / 1000).toFixed(2)} s` : "--",
+        sub: "Successful targets only",
+        color: [79, 70, 229],
+      },
+    ];
+
+    cards.forEach((card, idx) => {
+      const cx = startCardX + idx * (cardW + cardGap);
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(226, 232, 240);
+      doc.setLineWidth(0.3);
+      doc.roundedRect(cx, y, cardW, cardH, 2, 2, "FD");
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(6.5);
+      doc.setTextColor(100, 116, 139);
+      doc.text(card.label, cx + cardW / 2, y + 4.5, { align: "center" });
+
+      doc.setFontSize(11);
+      doc.setTextColor(card.color[0], card.color[1], card.color[2]);
+      doc.text(card.val, cx + cardW / 2, y + 10.5, { align: "center" });
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(6);
+      doc.setTextColor(148, 163, 184);
+      doc.text(card.sub, cx + cardW / 2, y + 15, { align: "center" });
+    });
+
+    y += cardH + 7;
+
+    // Section 1: Exercise Protocol Specification
+    this.renderSectionHeader(doc, "1. TARGET ACHIEVING GAME PROTOCOL SPECIFICATION", y);
+    y += 6;
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(51, 65, 85);
+    doc.text(
+      "The Target Achieving Game evaluates voluntary weight shifting, motor control, and dynamic balance stability using the Wii Balance Board.\n" +
+      "• Pre-Exercise Center Confirmation: Patient must position COP within the 40.0 mm center tolerance zone continuously for 2.0 seconds.\n" +
+      "• Sequential Target Display: Exactly one stationary balloon is displayed at a time in randomized order; future targets remain hidden.\n" +
+      "• 2-Second Continuous Hold Requirement: Real-time COP must remain uninterrupted inside the 40.0 mm tolerance zone for 2.0 full seconds.\n" +
+      "• Reset and Timeout Handling: If COP leaves target tolerance before 2.0 seconds, hold timer resets to 0. Maximum time limit is 10.0s per target.",
+      16,
+      y + 1,
+      { maxWidth: 178, lineHeightFactor: 1.35 }
+    );
+    y += 20;
+
+    // Section 2: Sequential Balloon Target Performance Table
+    this.renderSectionHeader(doc, "2. SEQUENTIAL BALLOON TARGET PERFORMANCE TABLE", y);
+    y += 6;
+
+    y = this.renderTargetGameSummaryTable(doc, summary.targetAttempts, y);
+    y += 7;
+
+    // Section 3: Scientific Definitions & Measurement Units
+    this.renderSectionHeader(doc, "3. SCIENTIFIC DEFINITIONS & MEASUREMENT UNITS", y);
+    y += 6;
+
+    doc.setFillColor(248, 250, 252);
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.3);
+    doc.roundedRect(16, y, 178, 26, 2, 2, "FD");
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7);
+    doc.setTextColor(71, 85, 105);
+
+    const defs = [
+      "• Target Hold Requirement (s): Prescribed continuous duration of 2.0 seconds required within tolerance zone before target is achieved.",
+      "• Achievement Percentage (%): (Successfully completed targets / 4 total targets) × 100.",
+      "• Average Achievement Time (s): Arithmetic mean duration of completed targets only. Timed-out / missed targets are strictly excluded.",
+      "• Physical Target Tolerance (mm): 40.0 mm radial acceptance boundary from each balloon's physical center coordinate on the balance board.",
+      "• Final Distance Error (mm): Calibrated Euclidean distance from patient's COP to target center at moment of completion or timeout.",
+      "• Non-Clinical Metric Notice: Measurements represent objective functional motor control data to assist clinical evaluation.",
+    ];
+
+    let defY = y + 4.2;
+    defs.forEach((d) => {
+      doc.text(d, 19, defY);
+      defY += 3.7;
+    });
+
+    this.renderTargetGameFooter(doc, 1, totalPages, summary, patient);
+
+    // =========================================================================
+    // PAGE 2: 2D Trajectory Plot, Target Performance Breakdown, Observations, Sign-off
+    // =========================================================================
+    doc.addPage();
+    this.renderTargetGameHeader(doc, 2, isSimulated);
+    y = 30;
+
+    // Section 4: 2D COP Trajectory & Balloon Target Zones
+    this.renderSectionHeader(doc, "4. 2D CENTER OF PRESSURE TRAJECTORY & BALLOON TARGET ZONES", y);
+    y += 6;
+
+    const plotW = 156;
+    const plotH = 88;
+    const plotX = (210 - plotW) / 2;
+    this.render2dTargetGameTrajectory(doc, summary, plotX, y, plotW, plotH);
+    y += plotH + 8;
+
+    // Section 5: Target Duration & Performance Breakdown Chart
+    this.renderSectionHeader(doc, "5. TARGET DURATION & COMPLETION PERFORMANCE", y);
+    y += 6;
+
+    this.renderTargetGameBarCharts(doc, summary.targetAttempts, 16, y, 178, 38);
+    y += 44;
+
+    // Section 6: Clinical Observations & Performance Analysis
+    this.renderSectionHeader(doc, "6. OBJECTIVE MOTOR CONTROL OBSERVATIONS (NON-DIAGNOSTIC)", y);
+    y += 6;
+
+    doc.setFillColor(248, 250, 252);
+    doc.setDrawColor(226, 232, 240);
+    doc.roundedRect(16, y, 178, 28, 2, 2, "FD");
+
+    const observations = this.generateTargetGameObservations(summary);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(15, 23, 42);
+
+    let obsY = y + 5;
+    observations.forEach((obs) => {
+      doc.text(`• ${obs}`, 20, obsY, { maxWidth: 170 });
+      obsY += 5;
+    });
+
+    y += 34;
+
+    // Section 7: Clinical Review & Rehabilitation Sign-Off
+    this.renderSectionHeader(doc, "7. CLINICAL REVIEW & REHABILITATION SIGN-OFF", y);
+    y += 6;
+
+    doc.setFillColor(255, 255, 255);
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.3);
+    doc.roundedRect(16, y, 178, 24, 2, 2, "FD");
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(7);
+    doc.setTextColor(100, 116, 139);
+    doc.text("REVIEWING CLINICIAN / PHYSIOTHERAPIST:", 20, y + 5);
+    doc.text("SIGNATURE & CREDENTIALS:", 100, y + 5);
+    doc.text("DATE:", 160, y + 5);
+
+    doc.setDrawColor(203, 213, 225);
+    doc.line(20, y + 17, 90, y + 17);
+    doc.line(100, y + 17, 150, y + 17);
+    doc.line(160, y + 17, 188, y + 17);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7);
+    doc.setTextColor(148, 163, 184);
+    doc.text("Doctor / PT Name (Print)", 20, y + 21);
+    doc.text("Authorized Signature", 100, y + 21);
+    doc.text("DD / MM / YYYY", 160, y + 21);
+
+    this.renderTargetGameFooter(doc, 2, totalPages, summary, patient);
+
+    return doc;
+  }
+
+  // =========================================================================
+  // HELPER: Target Game Header
+  // =========================================================================
+  private static renderTargetGameHeader(doc: jsPDF, _pageNum: number, isSimulated: boolean) {
+    doc.setFillColor(13, 148, 136); // Medical Teal Accent Bar
+    doc.rect(16, 12, 178, 1.2, "F");
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(11);
+    doc.setTextColor(15, 23, 42);
+    doc.text("PatientBalanceAI", 16, 18);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(100, 116, 139);
+    doc.text("Neuro-Rehabilitation & Balance Analysis System", 16, 22);
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(13, 148, 136);
+    doc.text("TARGET ACHIEVING GAME REPORT", 194, 18, { align: "right" });
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text(isSimulated ? "DEVELOPMENT SIMULATION" : "WII BALANCE BOARD ASSESSMENT", 194, 22, { align: "right" });
+
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.3);
+    doc.line(16, 25, 194, 25);
+  }
+
+  // =========================================================================
+  // HELPER: Target Game Footer
+  // =========================================================================
+  private static renderTargetGameFooter(
+    doc: jsPDF,
+    pageNum: number,
+    totalPages: number,
+    summary: GameSessionSummary,
+    _patient?: PatientProfile
+  ) {
+    const y = 282;
+
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.3);
+    doc.line(16, y, 194, y);
+
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(6.5);
+    doc.setTextColor(148, 163, 184);
+    doc.text(
+      "Notice: This report presents objective exercise-performance measurements from the Nintendo Wii Balance Board. " +
+      "It is intended to support rehabilitation tracking and does not constitute a medical diagnosis or clinically validated balance score.",
+      105,
+      y + 4,
+      { align: "center", maxWidth: 174 }
+    );
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7);
+    doc.setTextColor(100, 116, 139);
+    const sid = summary.sessionId || "N/A";
+    doc.text(`PatientBalanceAI | Target Achieving Game | Session: ${sid}`, 16, y + 10);
+    doc.text(`Page ${pageNum} of ${totalPages}`, 194, y + 10, { align: "right" });
+  }
+
+  // =========================================================================
+  // HELPER: Target Game Summary Table
+  // =========================================================================
+  private static renderTargetGameSummaryTable(
+    doc: jsPDF,
+    attempts: TargetAttemptResult[],
+    startY: number
+  ): number {
+    const startX = 16;
+    const tableW = 178;
+    const headerH = 7;
+    const rowH = 6.8;
+    let y = startY;
+
+    // Header Background
+    doc.setFillColor(13, 148, 136);
+    doc.rect(startX, y, tableW, headerH, "F");
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(6.5);
+    doc.setTextColor(255, 255, 255);
+
+    const cols = [
+      { header: "#", x: 20, align: "left" as const },
+      { header: "TARGET BALLOON", x: 30, align: "left" as const },
+      { header: "QUADRANT & POSITION", x: 74, align: "left" as const },
+      { header: "COORDINATES", x: 114, align: "left" as const },
+      { header: "STATUS", x: 144, align: "center" as const },
+      { header: "DURATION", x: 166, align: "right" as const },
+      { header: "FINAL DIST", x: 190, align: "right" as const },
+    ];
+
+    cols.forEach((col) => {
+      doc.text(col.header, col.x, y + 4.8, { align: col.align });
+    });
+
+    y += headerH;
+
+    // Table Rows
+    attempts.forEach((att, idx) => {
+      const isEven = idx % 2 === 0;
+      doc.setFillColor(isEven ? 255 : 248, isEven ? 255 : 250, isEven ? 255 : 252);
+      doc.rect(startX, y, tableW, rowH, "F");
+
+      doc.setDrawColor(241, 245, 249);
+      doc.setLineWidth(0.2);
+      doc.line(startX, y + rowH, startX + tableW, y + rowH);
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7);
+      doc.setTextColor(15, 23, 42);
+
+      // #
+      doc.text(`${att.targetIndex + 1}`, cols[0].x, y + 4.6);
+
+      // Name
+      doc.setFont("helvetica", "bold");
+      doc.text(att.name, cols[1].x, y + 4.6);
+
+      // Quadrant
+      doc.setFont("helvetica", "normal");
+      doc.text(att.directionLabel, cols[2].x, y + 4.6);
+
+      // Target Coordinates
+      const spec = BALLOON_TARGET_SPECS.find((s) => s.id === att.balloonId);
+      const coordStr = spec ? `X: ${spec.targetXMm > 0 ? "+" : ""}${spec.targetXMm.toFixed(1)} mm, Y: ${spec.targetYMm > 0 ? "+" : ""}${spec.targetYMm.toFixed(1)} mm` : "--";
+      doc.setFontSize(6.5);
+      doc.text(coordStr, cols[3].x, y + 4.6);
+      doc.setFontSize(7);
+
+      // Status
+      const isCompleted = att.status === "completed";
+      doc.setFont("helvetica", "bold");
+      if (isCompleted) {
+        doc.setTextColor(5, 150, 105);
+        doc.text("COMPLETED", cols[4].x, y + 4.6, { align: "center" });
+      } else {
+        doc.setTextColor(217, 119, 6);
+        doc.text("MISSED (Timeout)", cols[4].x, y + 4.6, { align: "center" });
+      }
+
+      // Duration
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(15, 23, 42);
+      const durationSec = (att.durationMs / 1000).toFixed(2);
+      doc.text(`${durationSec} s`, cols[5].x, y + 4.6, { align: "right" });
+
+      // Final Distance Error
+      const distStr = att.finalDistanceMm !== null ? `${att.finalDistanceMm.toFixed(1)} mm` : "--";
+      doc.text(distStr, cols[6].x, y + 4.6, { align: "right" });
+
+      y += rowH;
+    });
+
+    // Outer Table Border
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.4);
+    doc.rect(startX, startY, tableW, y - startY);
+
+    return y;
+  }
+
+  // =========================================================================
+  // HELPER: 2D Target Game Trajectory Plot on Wii Balance Board
+  // =========================================================================
+  private static render2dTargetGameTrajectory(
+    doc: jsPDF,
+    summary: GameSessionSummary,
+    boxX: number,
+    boxY: number,
+    boxW: number,
+    boxH: number
+  ) {
+    // Background chassis
+    doc.setFillColor(255, 255, 255);
+    doc.setDrawColor(203, 213, 225);
+    doc.setLineWidth(0.6);
+    doc.roundedRect(boxX, boxY, boxW, boxH, 8, 8, "FD");
+
+    // Board Surface Perimeter
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.3);
+    doc.roundedRect(boxX + 5, boxY + 5, boxW - 10, boxH - 10, 5, 5);
+
+    const centerX = boxX + boxW / 2;
+    const centerY = boxY + boxH / 2;
+
+    // Physical dimensions of Wii Balance Board: 446mm lateral × 238mm AP
+    const scaleX = (boxW - 24) / 446;
+    const scaleY = (boxH - 20) / 238;
+
+    // Crosshairs (Anteroposterior & Lateral axes)
+    doc.setDrawColor(241, 245, 249);
+    doc.setLineWidth(0.4);
+    doc.line(centerX, boxY + 5, centerX, boxY + boxH - 5);
+    doc.line(boxX + 5, centerY, boxX + boxW - 5, centerY);
+
+    // Axis Labels
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(6.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text("FRONT / ANTERIOR (+Y)", centerX, boxY + 4, { align: "center" });
+    doc.text("BACK / POSTERIOR (-Y)", centerX, boxY + boxH + 3.5, { align: "center" });
+    doc.text("← LEFT (-X)", boxX - 1, centerY - 1, { align: "right" });
+    doc.text("RIGHT (+X) →", boxX + boxW + 1, centerY - 1, { align: "left" });
+
+    // Draw Center Starting Zone (40.0mm tolerance circle)
+    const centerRadiusMm = 40.0;
+    const centerRadiusPlot = centerRadiusMm * scaleX;
+    doc.setFillColor(241, 245, 249);
+    doc.setDrawColor(148, 163, 184);
+    doc.setLineWidth(0.4);
+    doc.circle(centerX, centerY, centerRadiusPlot, "FD");
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(5.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text("Center Start (2s)", centerX, centerY - centerRadiusPlot - 1.2, { align: "center" });
+
+    // Center Crosshair
+    doc.setDrawColor(100, 116, 139);
+    doc.setLineWidth(0.2);
+    doc.line(centerX - 1.5, centerY, centerX + 1.5, centerY);
+    doc.line(centerX, centerY - 1.5, centerX, centerY + 1.5);
+
+    // Draw All 4 Balloon Target Zones
+    BALLOON_TARGET_SPECS.forEach((spec) => {
+      const tx = centerX + spec.targetXMm * scaleX;
+      const ty = centerY - spec.targetYMm * scaleY; // Invert Y for screen/PDF coords
+      const radiusPlot = DEFAULT_TARGET_TOLERANCE_MM * scaleX;
+
+      const attempt = summary.targetAttempts.find((a) => a.balloonId === spec.id);
+      const isCompleted = attempt ? attempt.status === "completed" : false;
+      const isAttempted = Boolean(attempt);
+
+      if (isCompleted) {
+        doc.setFillColor(236, 253, 245);
+        doc.setDrawColor(5, 150, 105);
+      } else if (isAttempted) {
+        doc.setFillColor(254, 243, 199);
+        doc.setDrawColor(217, 119, 6);
+      } else {
+        doc.setFillColor(248, 250, 252);
+        doc.setDrawColor(203, 213, 225);
+      }
+
+      doc.setLineWidth(0.5);
+      doc.circle(tx, ty, radiusPlot, "FD");
+
+      // Target Crosshair
+      doc.setDrawColor(100, 116, 139);
+      doc.setLineWidth(0.2);
+      doc.line(tx - 1.5, ty, tx + 1.5, ty);
+      doc.line(tx, ty - 1.5, tx, ty + 1.5);
+
+      // Target Name
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(6);
+      doc.setTextColor(15, 23, 42);
+      doc.text(`B${spec.id}: ${spec.name}`, tx, ty - radiusPlot - 1.2, { align: "center" });
+
+      // Target Status Badge
+      doc.setFontSize(5.5);
+      if (isCompleted) {
+        doc.setTextColor(5, 150, 105);
+        const durationSec = attempt ? (attempt.durationMs / 1000).toFixed(1) : "";
+        doc.text(`✓ Done (${durationSec}s)`, tx, ty + radiusPlot + 2.8, { align: "center" });
+      } else if (isAttempted) {
+        doc.setTextColor(217, 119, 6);
+        doc.text("✗ Missed (10.0s)", tx, ty + radiusPlot + 2.8, { align: "center" });
+      }
+    });
+
+    // Draw Continuous COP Trajectory Path
+    if (summary.trajectory && summary.trajectory.length > 1) {
+      doc.setDrawColor(13, 148, 136);
+      doc.setLineWidth(0.35);
+
+      let prevX: number | null = null;
+      let prevY: number | null = null;
+
+      for (let i = 0; i < summary.trajectory.length; i++) {
+        const pt = summary.trajectory[i];
+        const px = Math.max(boxX + 6, Math.min(boxX + boxW - 6, centerX + pt.copXMm * scaleX));
+        const py = Math.max(boxY + 6, Math.min(boxY + boxH - 6, centerY - pt.copYMm * scaleY));
+
+        if (prevX !== null && prevY !== null) {
+          doc.line(prevX, prevY, px, py);
+        }
+        prevX = px;
+        prevY = py;
+      }
+
+      // Mark Start Point (Green circle)
+      const firstPt = summary.trajectory[0];
+      const startPlotX = Math.max(boxX + 6, Math.min(boxX + boxW - 6, centerX + firstPt.copXMm * scaleX));
+      const startPlotY = Math.max(boxY + 6, Math.min(boxY + boxH - 6, centerY - firstPt.copYMm * scaleY));
+      doc.setFillColor(16, 185, 129);
+      doc.setDrawColor(255, 255, 255);
+      doc.setLineWidth(0.3);
+      doc.circle(startPlotX, startPlotY, 1.2, "FD");
+
+      // Mark End Point (Red circle)
+      const lastPt = summary.trajectory[summary.trajectory.length - 1];
+      const endPlotX = Math.max(boxX + 6, Math.min(boxX + boxW - 6, centerX + lastPt.copXMm * scaleX));
+      const endPlotY = Math.max(boxY + 6, Math.min(boxY + boxH - 6, centerY - lastPt.copYMm * scaleY));
+      doc.setFillColor(239, 68, 68);
+      doc.setDrawColor(255, 255, 255);
+      doc.setLineWidth(0.3);
+      doc.circle(endPlotX, endPlotY, 1.2, "FD");
+    } else {
+      // Clean fallback if no trajectory samples recorded
+      doc.setFont("helvetica", "italic");
+      doc.setFontSize(7);
+      doc.setTextColor(148, 163, 184);
+      doc.text("No continuous trajectory points recorded during session.", centerX, centerY + 20, { align: "center" });
+    }
+  }
+
+  // =========================================================================
+  // HELPER: Target Game Duration Bar Charts
+  // =========================================================================
+  private static renderTargetGameBarCharts(
+    doc: jsPDF,
+    attempts: TargetAttemptResult[],
+    startX: number,
+    startY: number,
+    totalW: number,
+    totalH: number
+  ) {
+    doc.setFillColor(255, 255, 255);
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.3);
+    doc.roundedRect(startX, startY, totalW, totalH, 2, 2, "FD");
+
+    const maxTimeSec = 10.0;
+    const barAreaW = totalW - 75;
+    const rowH = 7.5;
+    let y = startY + 4;
+
+    attempts.forEach((att, idx) => {
+      const isCompleted = att.status === "completed";
+      const durationSec = Math.min(maxTimeSec, att.durationMs / 1000);
+      const barW = Math.max(2, (durationSec / maxTimeSec) * barAreaW);
+
+      // Label: # + Name
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(6.8);
+      doc.setTextColor(15, 23, 42);
+      doc.text(`T${idx + 1}: ${att.name}`, startX + 5, y + 4.2);
+
+      // Duration Bar Background
+      const barStartX = startX + 46;
+      doc.setFillColor(241, 245, 249);
+      doc.rect(barStartX, y + 0.8, barAreaW, 4.5, "F");
+
+      // Filled Duration Bar
+      if (isCompleted) {
+        doc.setFillColor(13, 148, 136); // Teal
+      } else {
+        doc.setFillColor(245, 158, 11); // Amber
+      }
+      doc.rect(barStartX, y + 0.8, barW, 4.5, "F");
+
+      // Time Text & Status
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(6.5);
+      doc.setTextColor(71, 85, 105);
+      const statusLabel = isCompleted ? "✓ Completed" : "✗ Missed";
+      doc.text(`${durationSec.toFixed(2)} s (${statusLabel})`, barStartX + barAreaW + 4, y + 4.2);
+
+      y += rowH;
+    });
+
+    // Footnote
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(6);
+    doc.setTextColor(148, 163, 184);
+    doc.text("Time limit: 10.0 seconds per target • Continuous hold requirement: 2.0 seconds inside 40.0mm tolerance circle", startX + 5, startY + totalH - 2.5);
+  }
+
+  // =========================================================================
+  // HELPER: Generate Target Game Clinical Observations
+  // =========================================================================
+  private static generateTargetGameObservations(summary: GameSessionSummary): string[] {
+    const list: string[] = [];
+
+    // 1. Completion & Achievement Rate
+    if (summary.completedTargets === 4) {
+      list.push(
+        "Protocol Achievement: Patient completed all 4/4 balloon targets (100% completion rate), demonstrating functional multi-directional weight shift capability and motor control."
+      );
+    } else if (summary.completedTargets > 0) {
+      list.push(
+        `Partial Protocol Completion: Patient achieved ${summary.completedTargets} of 4 targets (${summary.achievementPercentage.toFixed(0)}%). Target progression was achieved in ${summary.completedTargets} direction(s), with ${summary.missedTargets} target(s) reaching the 10.0s time limit.`
+      );
+    } else {
+      list.push(
+        "Protocol Incomplete: Zero targets reached the 2.0-second continuous hold threshold within the 10.0-second time limit. Patient exhibited restricted voluntary limits of stability."
+      );
+    }
+
+    // 2. Average Achievement Time
+    if (summary.averageAchievementTimeMs !== null) {
+      const avgSec = summary.averageAchievementTimeMs / 1000;
+      const speedDescriptor = avgSec < 4.0 ? "rapid" : avgSec < 7.0 ? "moderate" : "deliberate";
+      list.push(
+        `Response Speed: Average target achievement time was ${avgSec.toFixed(2)}s for completed targets, reflecting ${speedDescriptor} voluntary postural adjustments.`
+      );
+    } else {
+      list.push(
+        "Response Speed: Average target achievement time is not applicable as no targets were completed within prescribed limits."
+      );
+    }
+
+    // 3. Trajectory & Telemetry
+    if (summary.trajectory && summary.trajectory.length > 0) {
+      list.push(
+        `Sensor Telemetry: Acquired ${summary.trajectory.length.toLocaleString()} continuous COP measurement points from calibrated 4-load-cell platform without data substitution.`
+      );
+    } else {
+      list.push(
+        "Sensor Telemetry: Real-time telemetry monitoring active across exercise protocol."
+      );
+    }
+
+    // 4. Clinical Notice
+    list.push(
+      "Rehabilitation Review: Objective performance data is intended to assist functional tracking and therapeutic progression under clinician supervision."
+    );
 
     return list;
   }

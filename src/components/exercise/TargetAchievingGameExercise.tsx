@@ -21,16 +21,21 @@ import {
   Timer,
   Activity,
   Award,
+  Download,
 } from "lucide-react";
 import { PatientProfile } from "../../types/patient";
 import { useBalanceBoard } from "../../context/HardwareContext";
 import { VisualBalanceBoard } from "../balance/VisualBalanceBoard";
 import { mapCopToBoard } from "../../utils/copMapping";
+import { PdfReportService, GeneratePdfResult } from "../../services/pdfReportService";
 import {
   BALLOON_TARGET_SPECS,
   BalloonTargetDefinition,
   BalloonTargetDetector,
+  CenterPositionDetector,
   DEFAULT_TARGET_TOLERANCE_MM,
+  DEFAULT_CENTER_TOLERANCE_MM,
+  DEFAULT_CENTER_HOLD_DURATION_MS,
   DEFAULT_CONFIRMATION_DURATION_MS,
   DEFAULT_TARGET_TIME_LIMIT_MS,
   TargetOutcomeStatus,
@@ -116,6 +121,12 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
   const recordedTrajectoryRef = useRef<RecordedCopPoint[]>([]);
   const sessionStartTimeRef = useRef<number>(Date.now());
   const targetStartTimeRef = useRef<number>(Date.now());
+  const sessionIdRef = useRef<string>(`game_${Date.now()}`);
+
+  // PDF report export state
+  const [isExportingPdf, setIsExportingPdf] = useState<boolean>(false);
+  const [pdfResult, setPdfResult] = useState<GeneratePdfResult | null>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
 
   // Transition & live sensor refs for steady 30Hz frame updates
   const isTransitioningRef = useRef<boolean>(false);
@@ -133,6 +144,7 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
   const [deflatingBalloonId, setDeflatingBalloonId] = useState<number | null>(null);
   const [burstParticles, setBurstParticles] = useState<BurstParticle[]>([]);
   const [missedFeedbackMessage, setMissedFeedbackMessage] = useState<string | null>(null);
+  const [successFeedbackMessage, setSuccessFeedbackMessage] = useState<string | null>(null);
 
   // Audio service ref
   const audioRef = useRef<TargetGameAudioService>(new TargetGameAudioService(false));
@@ -148,6 +160,26 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
       audioRef.current.dispose();
     };
   }, []);
+
+  // Centre starting confirmation state (Step 2)
+  const [isCenterConfirmed, setIsCenterConfirmed] = useState<boolean>(false);
+  const [centerDetectionState, setCenterDetectionState] = useState<{
+    distanceMm: number | null;
+    isInCenterZone: boolean;
+    holdProgress: number;
+    holdSecondsCountdown: number;
+    isConfirmed: boolean;
+  }>({
+    distanceMm: null,
+    isInCenterZone: false,
+    holdProgress: 0.0,
+    holdSecondsCountdown: Math.ceil(DEFAULT_CENTER_HOLD_DURATION_MS / 1000),
+    isConfirmed: false,
+  });
+
+  const centerDetectorRef = useRef<CenterPositionDetector>(
+    new CenterPositionDetector(DEFAULT_CENTER_TOLERANCE_MM, DEFAULT_CENTER_HOLD_DURATION_MS)
+  );
 
   // Real-time COP target detection & timer state
   const [detectionState, setDetectionState] = useState<{
@@ -187,8 +219,9 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
     return BALLOON_TARGET_SPECS.find((b) => b.id === activeBalloonId) || BALLOON_TARGET_SPECS[0];
   }, [activeBalloonId]);
 
-  // Synchronize active target in detector when current target changes
+  // Synchronize active target in detector when current target changes or center confirmed
   useEffect(() => {
+    if (!isCenterConfirmed) return;
     const now = Date.now();
     targetStartTimeRef.current = now;
     detectorRef.current.setTarget(activeBalloon.id, now);
@@ -204,11 +237,12 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
       status: "active",
     });
     setMissedFeedbackMessage(null);
-  }, [activeBalloon.id]);
+    setSuccessFeedbackMessage(null);
+  }, [activeBalloon.id, isCenterConfirmed]);
 
   // Record real-time COP trajectory points during active exercise
   useEffect(() => {
-    if (isSessionComplete || isPaused || !hasLiveReading || !reading) {
+    if (isSessionComplete || isPaused || !hasLiveReading || !reading || !isCenterConfirmed) {
       return;
     }
 
@@ -223,7 +257,7 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
     });
   }, [reading, hasLiveReading, isSessionComplete, isPaused, activeBalloon.id, currentTargetIndex]);
 
-  // Periodic frame processing loop (~30Hz) for real COP evaluation, 3s continuous hold, and timer countdown
+  // Periodic frame processing loop (~30Hz) for real COP evaluation, 2s continuous hold, and timer countdown
   useEffect(() => {
     if (isSessionComplete) {
       return;
@@ -240,9 +274,39 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
       const isCurrentPaused = isPausedRef.current;
       const hasCurrentLiveReading = hasLiveReadingRef.current;
 
+      const currentCopXMm = hasCurrentLiveReading && currentReading ? currentReading.copXMm : null;
+      const currentCopYMm = hasCurrentLiveReading && currentReading ? currentReading.copYMm : null;
+
+      // 1. Pre-start Gate: Continuous 2-second Centre Hold Confirmation
+      if (!isCenterConfirmed) {
+        const centerRes = centerDetectorRef.current.update(
+          currentCopXMm,
+          currentCopYMm,
+          now,
+          isCurrentConnected,
+          isCurrentPaused
+        );
+
+        setCenterDetectionState({
+          distanceMm: centerRes.distanceMm,
+          isInCenterZone: centerRes.isInCenterZone,
+          holdProgress: centerRes.holdProgress,
+          holdSecondsCountdown: centerRes.holdSecondsCountdown,
+          isConfirmed: centerRes.isConfirmed,
+        });
+
+        if (centerRes.isConfirmed) {
+          setIsCenterConfirmed(true);
+          sessionStartTimeRef.current = now;
+          targetStartTimeRef.current = now;
+          detectorRef.current.setTarget(activeBalloon.id, now);
+        }
+        return;
+      }
+
       const result = detectorRef.current.update(
-        hasCurrentLiveReading && currentReading ? currentReading.copXMm : null,
-        hasCurrentLiveReading && currentReading ? currentReading.copYMm : null,
+        currentCopXMm,
+        currentCopYMm,
         activeBalloon.targetXMm,
         activeBalloon.targetYMm,
         now,
@@ -262,10 +326,11 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
         status: result.status,
       });
 
-      // 1. Successful Target Achievement: Only after full 3-second continuous hold
+      // 1. Successful Target Achievement: Only after full 2-second continuous hold
       if (result.isAchieved && !isTransitioningRef.current) {
         isTransitioningRef.current = true;
         setPoppingBalloonId(activeBalloon.id);
+        setSuccessFeedbackMessage(`Balloon ${activeBalloon.number} Achieved! Great job!`);
         audioRef.current.playBalloonPop();
 
         // Generate 12 radial burst particles for pop animation
@@ -305,6 +370,7 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
           setBalloonOutcomes((prev) => new Map(prev).set(activeBalloon.id, "completed"));
           setPoppingBalloonId(null);
           setBurstParticles([]);
+          setSuccessFeedbackMessage(null);
 
           if (currentTargetIndex < sequence.length - 1) {
             setCurrentTargetIndex((prev) => prev + 1);
@@ -367,32 +433,77 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
     isSessionComplete,
     poppingBalloonId,
     deflatingBalloonId,
+    isCenterConfirmed,
   ]);
 
   // Compute final session results summary from actual session data
   const sessionSummary: GameSessionSummary = useMemo(() => {
     const totalDurationMs = Date.now() - sessionStartTimeRef.current;
-    return computeGameSessionSummary(targetAttempts, recordedTrajectoryRef.current, totalDurationMs);
-  }, [targetAttempts]);
+    return computeGameSessionSummary(
+      targetAttempts,
+      recordedTrajectoryRef.current,
+      totalDurationMs,
+      {
+        sessionId: sessionIdRef.current,
+        sessionDate: new Date(sessionStartTimeRef.current).toISOString(),
+        isRealHardware: isConnected,
+        patientName: patient?.fullName,
+        patientId: patient?.medicalRecordNumber || patient?.id,
+      }
+    );
+  }, [targetAttempts, isConnected, patient]);
 
   // Clean Start / Reset handler
   const handleStartNewGame = () => {
     const nextSeq = generateRandomSequence(sequence);
     setSequence(nextSeq);
     setCurrentTargetIndex(0);
+    setIsCenterConfirmed(false);
+    centerDetectorRef.current.reset();
+    setCenterDetectionState({
+      distanceMm: null,
+      isInCenterZone: false,
+      holdProgress: 0.0,
+      holdSecondsCountdown: Math.ceil(DEFAULT_CENTER_HOLD_DURATION_MS / 1000),
+      isConfirmed: false,
+    });
     setBalloonOutcomes(new Map());
     setTargetAttempts([]);
     recordedTrajectoryRef.current = [];
+    sessionIdRef.current = `game_${Date.now()}`;
+    setPdfResult(null);
+    setPdfError(null);
     sessionStartTimeRef.current = Date.now();
     targetStartTimeRef.current = Date.now();
     setPoppingBalloonId(null);
     setDeflatingBalloonId(null);
     setBurstParticles([]);
     setMissedFeedbackMessage(null);
+    setSuccessFeedbackMessage(null);
     setIsSessionComplete(false);
     setIsPaused(false);
     isTransitioningRef.current = false;
     detectorRef.current.reset();
+  };
+
+  // Export Doctor Clinical PDF Report
+  const handleExportDoctorPdf = async () => {
+    try {
+      setIsExportingPdf(true);
+      setPdfError(null);
+      const result = await PdfReportService.generateAndSaveTargetAchievingReport(
+        sessionSummary,
+        patient,
+        new Date(sessionStartTimeRef.current),
+        isConnected
+      );
+      setPdfResult(result);
+    } catch (err) {
+      console.error("Failed to generate doctor PDF report:", err);
+      setPdfError(err instanceof Error ? err.message : "Failed to generate doctor report.");
+    } finally {
+      setIsExportingPdf(false);
+    }
   };
 
   const handleTogglePause = () => {
@@ -535,6 +646,29 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
             )}
 
             <button
+              onClick={handleExportDoctorPdf}
+              disabled={isExportingPdf}
+              className="btn-ghost"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "8px 16px",
+                fontSize: "0.875rem",
+                fontWeight: 700,
+                color: "#0D9488",
+                background: "#F0FDFA",
+                border: "1px solid #99F6E4",
+                borderRadius: "10px",
+                cursor: isExportingPdf ? "not-allowed" : "pointer",
+                opacity: isExportingPdf ? 0.7 : 1,
+              }}
+            >
+              <Download size={15} />
+              <span>{isExportingPdf ? "Exporting PDF..." : "Export Doctor PDF"}</span>
+            </button>
+
+            <button
               onClick={handleStartNewGame}
               className="btn-primary"
               style={{
@@ -557,6 +691,52 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
             </button>
           </div>
         </div>
+
+        {/* PDF Export Feedback Banners */}
+        {pdfResult && (
+          <div
+            style={{
+              padding: "12px 18px",
+              borderRadius: "12px",
+              background: "#ECFDF5",
+              border: "1px solid #10B981",
+              color: "#065F46",
+              fontSize: "0.875rem",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: "8px",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <CheckCircle2 size={16} />
+              <span>
+                Doctor PDF Report generated: <strong>{pdfResult.filename}</strong>
+              </span>
+            </div>
+            <span style={{ fontSize: "0.75rem", color: "#047857" }}>{pdfResult.filePath}</span>
+          </div>
+        )}
+
+        {pdfError && (
+          <div
+            style={{
+              padding: "12px 18px",
+              borderRadius: "12px",
+              background: "#FEF2F2",
+              border: "1px solid #EF4444",
+              color: "#991B1B",
+              fontSize: "0.875rem",
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+            }}
+          >
+            <XCircle size={16} />
+            <span>Failed to generate report: {pdfError}</span>
+          </div>
+        )}
 
         {/* 2. Results Hero Assessment Banner */}
         <div
@@ -1202,7 +1382,30 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
             <span>Return to Exercises</span>
           </button>
 
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+            <button
+              onClick={handleExportDoctorPdf}
+              disabled={isExportingPdf}
+              className="btn-ghost"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "12px 20px",
+                fontSize: "0.9375rem",
+                fontWeight: 700,
+                color: "#0D9488",
+                background: "#F0FDFA",
+                border: "1.5px solid #99F6E4",
+                borderRadius: "10px",
+                cursor: isExportingPdf ? "not-allowed" : "pointer",
+                opacity: isExportingPdf ? 0.7 : 1,
+              }}
+            >
+              <Download size={16} />
+              <span>{isExportingPdf ? "Exporting PDF..." : "Export Doctor PDF"}</span>
+            </button>
+
             <button
               onClick={handleStartNewGame}
               className="btn-primary"
@@ -1244,33 +1447,8 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
         padding: "4px 0 40px 0",
       }}
     >
-      {/* Subtle floating, pulsing, balloon pop and deflation animations */}
+      {/* Balloon pop burst and deflation animations */}
       <style>{`
-        @keyframes balloonFloat {
-          0% {
-            transform: translateY(0px) rotate(0deg);
-          }
-          50% {
-            transform: translateY(-5px) rotate(1.2deg);
-          }
-          100% {
-            transform: translateY(0px) rotate(0deg);
-          }
-        }
-        @keyframes pulseRing {
-          0% {
-            transform: scale(0.92);
-            opacity: 0.8;
-          }
-          50% {
-            transform: scale(1.18);
-            opacity: 0.25;
-          }
-          100% {
-            transform: scale(0.92);
-            opacity: 0.8;
-          }
-        }
         @keyframes balloonPopBurst {
           0% {
             transform: scale(1.25);
@@ -1311,9 +1489,6 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
             transform: translate(var(--p-dx), var(--p-dy)) scale(0);
             opacity: 0;
           }
-        }
-        .balloon-floating {
-          animation: balloonFloat 3s ease-in-out infinite;
         }
         .balloon-popping {
           animation: balloonPopBurst 0.5s ease-out forwards;
@@ -1598,7 +1773,9 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                   Session Target
                 </span>
                 <strong style={{ fontSize: "0.9375rem", fontWeight: 800, color: "#065F46" }}>
-                  {Math.min(currentTargetIndex + 1, sequence.length)} of {sequence.length}
+                  {!isCenterConfirmed
+                    ? "Centre Start"
+                    : `Target ${Math.min(currentTargetIndex + 1, sequence.length)} of ${sequence.length}`}
                 </strong>
               </div>
             </div>
@@ -1613,15 +1790,23 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                 borderRadius: "12px",
                 background: isPaused
                   ? "#F8FAFC"
-                  : detectionState.timeRemainingMs <= 3000
-                    ? "#FEF2F2"
-                    : "#FFFFFF",
+                  : !isCenterConfirmed
+                    ? centerDetectionState.isInCenterZone
+                      ? "#EFF6FF"
+                      : "#FFFFFF"
+                    : detectionState.timeRemainingMs <= 3000
+                      ? "#FEF2F2"
+                      : "#FFFFFF",
                 border: `1.5px solid ${
                   isPaused
                     ? "#CBD5E1"
-                    : detectionState.timeRemainingMs <= 3000
-                      ? "#FCA5A5"
-                      : "#99F6E4"
+                    : !isCenterConfirmed
+                      ? centerDetectionState.isInCenterZone
+                        ? "#93C5FD"
+                        : "#CBD5E1"
+                      : detectionState.timeRemainingMs <= 3000
+                        ? "#FCA5A5"
+                        : "#99F6E4"
                 }`,
                 boxShadow: "0 2px 6px rgba(0, 0, 0, 0.04)",
               }}
@@ -1631,14 +1816,22 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                 color={
                   isPaused
                     ? "#64748B"
-                    : detectionState.timeRemainingMs <= 3000
-                      ? "#DC2626"
-                      : "#0D9488"
+                    : !isCenterConfirmed
+                      ? centerDetectionState.isInCenterZone
+                        ? "#2563EB"
+                        : "#64748B"
+                      : detectionState.timeRemainingMs <= 3000
+                        ? "#DC2626"
+                        : "#0D9488"
                 }
               />
               <div style={{ display: "flex", flexDirection: "column" }}>
                 <span style={{ fontSize: "0.6875rem", fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", letterSpacing: "0.05em" }}>
-                  {isPaused ? "Timer Paused" : "Time Left"}
+                  {isPaused
+                    ? "Timer Paused"
+                    : !isCenterConfirmed
+                      ? "Centre Hold"
+                      : "Time Left"}
                 </span>
                 <strong
                   style={{
@@ -1647,17 +1840,44 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                     fontFamily: "var(--font-mono, monospace)",
                     color: isPaused
                       ? "#64748B"
-                      : detectionState.timeRemainingMs <= 3000
-                        ? "#DC2626"
-                        : "#0F766E",
+                      : !isCenterConfirmed
+                        ? centerDetectionState.isInCenterZone
+                          ? "#1D4ED8"
+                          : "#64748B"
+                        : detectionState.timeRemainingMs <= 3000
+                          ? "#DC2626"
+                          : "#0F766E",
                   }}
                 >
-                  {timeRemainingSeconds}s
+                  {!isCenterConfirmed
+                    ? `${centerDetectionState.holdSecondsCountdown}s`
+                    : `${timeRemainingSeconds}s`}
                 </strong>
               </div>
             </div>
           </div>
         </div>
+
+        {/* Transient Success Feedback Alert */}
+        {successFeedbackMessage && (
+          <div
+            style={{
+              padding: "12px 18px",
+              background: "#ECFDF5",
+              borderRadius: "10px",
+              border: "1.5px solid #6EE7B7",
+              display: "flex",
+              alignItems: "center",
+              gap: "10px",
+              color: "#065F46",
+              fontSize: "0.875rem",
+              fontWeight: 700,
+            }}
+          >
+            <CheckCircle2 size={18} color="#059669" />
+            <span>{successFeedbackMessage}</span>
+          </div>
+        )}
 
         {/* Transient Missed Target Feedback Alert */}
         {missedFeedbackMessage && (
@@ -1720,105 +1940,206 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
         )}
 
         {/* Active Target Instruction Card with Real-time Distance & Confirmation Hold Bar */}
-        <div
-          style={{
-            padding: "16px 20px",
-            background: "#FFFFFF",
-            borderRadius: "14px",
-            border: `2px solid ${activeBalloon.color}`,
-            boxShadow: `0 4px 14px ${activeBalloon.color}20`,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            flexWrap: "wrap",
-            gap: "14px",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
-            <div
-              style={{
-                width: "40px",
-                height: "40px",
-                borderRadius: "50%",
-                background: activeBalloon.color,
-                color: "#FFFFFF",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: "1.25rem",
-                fontWeight: 900,
-                boxShadow: `0 4px 10px ${activeBalloon.color}55`,
-                flexShrink: 0,
-              }}
-            >
-              {activeBalloon.number}
-            </div>
-            <div>
-              <div style={{ fontSize: "1.0625rem", fontWeight: 800, color: "var(--text-main)", lineHeight: 1.4 }}>
-                Shift your body weight towards{" "}
-                <span style={{ color: activeBalloon.color }}>Balloon {activeBalloon.number}</span>{" "}
-                ({activeBalloon.directionLabel})
-              </div>
-              <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", marginTop: "2px" }}>
-                {detectionState.isInTolerance ? (
-                  <strong style={{ color: "#059669", display: "inline-flex", alignItems: "center", gap: "6px" }}>
-                    <span>Target Reached! Keep holding:</span>
-                    <span
-                      style={{
-                        background: "#059669",
-                        color: "#FFFFFF",
-                        padding: "1px 7px",
-                        borderRadius: "6px",
-                        fontSize: "0.875rem",
-                        fontWeight: 900,
-                      }}
-                    >
-                      {detectionState.holdSecondsCountdown}s
-                    </span>
-                    <span style={{ fontSize: "0.75rem", color: "#065F46" }}>
-                      ({Math.round(detectionState.holdProgress * 100)}%)
-                    </span>
-                  </strong>
-                ) : (
-                  <span>
-                    Target Euclidean distance:{" "}
-                    <strong>
-                      {detectionState.distanceMm !== null ? `${detectionState.distanceMm.toFixed(1)} mm` : "--"}
-                    </strong>{" "}
-                    (Required: ≤ {DEFAULT_TARGET_TOLERANCE_MM} mm)
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Hold progress bar */}
-          {detectionState.isInTolerance && (
-            <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: "170px" }}>
+        {!isCenterConfirmed ? (
+          <div
+            style={{
+              padding: "16px 20px",
+              background: "#FFFFFF",
+              borderRadius: "14px",
+              border: "2px solid #4F46E5",
+              boxShadow: "0 4px 14px rgba(79, 70, 229, 0.15)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: "14px",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
               <div
                 style={{
-                  flex: 1,
-                  height: "8px",
-                  background: "#E2E8F0",
-                  borderRadius: "4px",
-                  overflow: "hidden",
+                  width: "40px",
+                  height: "40px",
+                  borderRadius: "50%",
+                  background: "#4F46E5",
+                  color: "#FFFFFF",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: "1.25rem",
+                  fontWeight: 900,
+                  boxShadow: "0 4px 10px rgba(79, 70, 229, 0.3)",
+                  flexShrink: 0,
                 }}
               >
+                ⊙
+              </div>
+              <div>
+                <div style={{ fontSize: "1.0625rem", fontWeight: 800, color: "var(--text-main)", lineHeight: 1.4 }}>
+                  Stand at the Centre of the Balance Board
+                </div>
+                <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", marginTop: "2px" }}>
+                  {centerDetectionState.isInCenterZone ? (
+                    <strong style={{ color: "#059669", display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                      <span>Centre position reached! Keep holding:</span>
+                      <span
+                        style={{
+                          background: "#059669",
+                          color: "#FFFFFF",
+                          padding: "1px 7px",
+                          borderRadius: "6px",
+                          fontSize: "0.875rem",
+                          fontWeight: 900,
+                        }}
+                      >
+                        {centerDetectionState.holdSecondsCountdown}s
+                      </span>
+                      <span style={{ fontSize: "0.75rem", color: "#065F46" }}>
+                        ({Math.round(centerDetectionState.holdProgress * 100)}%)
+                      </span>
+                    </strong>
+                  ) : (
+                    <span>
+                      Distance to centre:{" "}
+                      <strong>
+                        {centerDetectionState.distanceMm !== null ? `${centerDetectionState.distanceMm.toFixed(1)} mm` : "--"}
+                      </strong>{" "}
+                      (Required: ≤ {DEFAULT_CENTER_TOLERANCE_MM} mm)
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Centre Hold progress bar */}
+            {centerDetectionState.isInCenterZone && (
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: "170px" }}>
                 <div
                   style={{
-                    height: "100%",
-                    width: `${Math.round(detectionState.holdProgress * 100)}%`,
-                    background: "#059669",
-                    transition: "width 0.05s linear",
+                    flex: 1,
+                    height: "8px",
+                    background: "#E2E8F0",
+                    borderRadius: "4px",
+                    overflow: "hidden",
                   }}
-                />
+                >
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${Math.round(centerDetectionState.holdProgress * 100)}%`,
+                      background: "#059669",
+                      transition: "width 0.05s linear",
+                    }}
+                  />
+                </div>
+                <span style={{ fontSize: "0.8125rem", fontWeight: 900, color: "#059669" }}>
+                  {centerDetectionState.holdSecondsCountdown}s
+                </span>
               </div>
-              <span style={{ fontSize: "0.8125rem", fontWeight: 900, color: "#059669" }}>
-                {detectionState.holdSecondsCountdown}s
-              </span>
+            )}
+          </div>
+        ) : (
+          <div
+            style={{
+              padding: "16px 20px",
+              background: "#FFFFFF",
+              borderRadius: "14px",
+              border: `2px solid ${activeBalloon.color}`,
+              boxShadow: `0 4px 14px ${activeBalloon.color}20`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: "14px",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
+              <div
+                style={{
+                  width: "40px",
+                  height: "40px",
+                  borderRadius: "50%",
+                  background: activeBalloon.color,
+                  color: "#FFFFFF",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: "1.25rem",
+                  fontWeight: 900,
+                  boxShadow: `0 4px 10px ${activeBalloon.color}55`,
+                  flexShrink: 0,
+                }}
+              >
+                {activeBalloon.number}
+              </div>
+              <div>
+                <div style={{ fontSize: "1.0625rem", fontWeight: 800, color: "var(--text-main)", lineHeight: 1.4 }}>
+                  Move your weight towards the balloon
+                  <span style={{ fontSize: "0.875rem", fontWeight: 700, color: activeBalloon.color, marginLeft: "8px" }}>
+                    (Balloon {activeBalloon.number} • {activeBalloon.directionLabel})
+                  </span>
+                </div>
+                <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", marginTop: "2px" }}>
+                  {detectionState.isInTolerance ? (
+                    <strong style={{ color: "#059669", display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                      <span>Target Reached! Keep holding:</span>
+                      <span
+                        style={{
+                          background: "#059669",
+                          color: "#FFFFFF",
+                          padding: "1px 7px",
+                          borderRadius: "6px",
+                          fontSize: "0.875rem",
+                          fontWeight: 900,
+                        }}
+                      >
+                        {detectionState.holdSecondsCountdown}s
+                      </span>
+                      <span style={{ fontSize: "0.75rem", color: "#065F46" }}>
+                        ({Math.round(detectionState.holdProgress * 100)}%)
+                      </span>
+                    </strong>
+                  ) : (
+                    <span>
+                      Target Euclidean distance:{" "}
+                      <strong>
+                        {detectionState.distanceMm !== null ? `${detectionState.distanceMm.toFixed(1)} mm` : "--"}
+                      </strong>{" "}
+                      (Required: ≤ {DEFAULT_TARGET_TOLERANCE_MM} mm)
+                    </span>
+                  )}
+                </div>
+              </div>
             </div>
-          )}
-        </div>
+
+            {/* Hold progress bar */}
+            {detectionState.isInTolerance && (
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: "170px" }}>
+                <div
+                  style={{
+                    flex: 1,
+                    height: "8px",
+                    background: "#E2E8F0",
+                    borderRadius: "4px",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${Math.round(detectionState.holdProgress * 100)}%`,
+                      background: "#059669",
+                      transition: "width 0.05s linear",
+                    }}
+                  />
+                </div>
+                <span style={{ fontSize: "0.8125rem", fontWeight: 900, color: "#059669" }}>
+                  {detectionState.holdSecondsCountdown}s
+                </span>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* 4-Step Sequence Progress Tracker with Completed / Missed Badges */}
         <div
@@ -1833,7 +2154,8 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
             const outcome = balloonOutcomes.get(b.id);
             const isCompleted = outcome === "completed";
             const isMissed = outcome === "missed";
-            const isCurrent = stepIndex === currentTargetIndex;
+            const isCurrent = isCenterConfirmed && stepIndex === currentTargetIndex;
+            const isRevealed = isCompleted || isMissed || isCurrent;
 
             return (
               <div
@@ -1862,7 +2184,7 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                     ? `0 4px 12px ${b.color}25`
                     : "none",
                   transition: "all 0.2s ease",
-                  opacity: isCompleted || isMissed ? 0.95 : isCurrent ? 1.0 : 0.5,
+                  opacity: isCompleted || isMissed ? 0.95 : isCurrent ? 1.0 : 0.6,
                 }}
               >
                 {/* Step indicator circle */}
@@ -1887,7 +2209,7 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                     flexShrink: 0,
                   }}
                 >
-                  {isCompleted ? "✓" : isMissed ? "✕" : b.number}
+                  {isCompleted ? "✓" : isMissed ? "✕" : isCurrent ? b.number : stepIndex + 1}
                 </div>
 
                 <div style={{ display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden" }}>
@@ -1907,7 +2229,7 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                         letterSpacing: "0.04em",
                       }}
                     >
-                      Step {stepIndex + 1}
+                      Target {stepIndex + 1}
                     </span>
                     {isCompleted && (
                       <span
@@ -1971,7 +2293,7 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                       overflow: "hidden",
                     }}
                   >
-                    Balloon {b.number}
+                    {isRevealed ? `Balloon ${b.number}` : `Target ${stepIndex + 1}`}
                   </span>
                 </div>
               </div>
@@ -2227,6 +2549,10 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
               <span style={{ color: "#D97706", fontWeight: 700 }}>
                 Exercise Paused — Telemetry & Timer Paused.
               </span>
+            ) : !isCenterConfirmed ? (
+              <span style={{ color: "#4F46E5", fontWeight: 700 }}>
+                Centre Starting Position — Please stand at the centre of the balance board.
+              </span>
             ) : (
               <>
                 Active target: <strong>Balloon {activeBalloon.number} ({activeBalloon.directionLabel})</strong> • Target {currentTargetIndex + 1} of {sequence.length}
@@ -2252,110 +2578,87 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
             isConnected={isConnected}
             isSimulated={false}
           >
-            {/* Balloons on Board: active, upcoming, completed and deflating */}
-            {BALLOON_TARGET_SPECS.map((target) => {
+            {/* Stage 1: Centre start position indicator and 2-second countdown */}
+            {!isSessionComplete && !isCenterConfirmed && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: "50%",
+                  top: "50%",
+                  transform: "translate(-50%, -50%)",
+                  pointerEvents: "none",
+                  zIndex: 15,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: "6px",
+                }}
+              >
+                <div
+                  style={{
+                    width: "36px",
+                    height: "36px",
+                    borderRadius: "50%",
+                    background: centerDetectionState.isInCenterZone ? "#10B981" : "rgba(79, 70, 229, 0.9)",
+                    border: "2px solid #FFFFFF",
+                    boxShadow: centerDetectionState.isInCenterZone
+                      ? "0 0 16px rgba(16, 185, 129, 0.6)"
+                      : "0 0 12px rgba(79, 70, 229, 0.4)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: "#FFFFFF",
+                    fontWeight: 900,
+                    fontSize: centerDetectionState.isInCenterZone ? "1.125rem" : "0.9375rem",
+                    transition: "all 0.15s ease",
+                  }}
+                >
+                  {centerDetectionState.isInCenterZone ? centerDetectionState.holdSecondsCountdown : "⊙"}
+                </div>
+
+                {centerDetectionState.isInCenterZone && (
+                  <div
+                    style={{
+                      background: "#065F46",
+                      color: "#FFFFFF",
+                      padding: "3px 10px",
+                      borderRadius: "12px",
+                      fontSize: "0.75rem",
+                      fontWeight: 800,
+                      letterSpacing: "0.04em",
+                      boxShadow: "0 2px 8px rgba(0, 0, 0, 0.25)",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    HOLD CENTRE: {centerDetectionState.holdSecondsCountdown}s
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Stage 2: Display ONLY the single active balloon target when center has been confirmed; no dashed circle, no inactive balloons */}
+            {!isSessionComplete && isCenterConfirmed && (() => {
+              const target = activeBalloon;
               const coords = mapCopToBoard(target.copX, target.copY);
-              const outcome = balloonOutcomes.get(target.id);
               const isPopping = poppingBalloonId === target.id;
               const isDeflating = deflatingBalloonId === target.id;
-              const isActive = !isSessionComplete && target.id === activeBalloonId && !outcome;
-
-              // Completed balloon persistent badge
-              if (outcome === "completed" && !isPopping) {
-                return (
-                  <div
-                    key={`popped-badge-${target.id}`}
-                    style={{
-                      position: "absolute",
-                      left: `${coords.xPercent}%`,
-                      top: `${coords.yPercent}%`,
-                      transform: "translate(-50%, -50%)",
-                      pointerEvents: "none",
-                      zIndex: 8,
-                      opacity: 0.55,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: "22px",
-                        height: "22px",
-                        borderRadius: "50%",
-                        background: "#059669",
-                        color: "#FFFFFF",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: "0.6875rem",
-                        fontWeight: 900,
-                        boxShadow: "0 1px 3px rgba(0,0,0,0.15)",
-                      }}
-                    >
-                      ✓
-                    </div>
-                  </div>
-                );
-              }
-
-              // Missed balloon persistent badge
-              if (outcome === "missed" && !isDeflating) {
-                return (
-                  <div
-                    key={`missed-badge-${target.id}`}
-                    style={{
-                      position: "absolute",
-                      left: `${coords.xPercent}%`,
-                      top: `${coords.yPercent}%`,
-                      transform: "translate(-50%, -50%)",
-                      pointerEvents: "none",
-                      zIndex: 8,
-                      opacity: 0.45,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: "22px",
-                        height: "22px",
-                        borderRadius: "50%",
-                        background: "#DC2626",
-                        color: "#FFFFFF",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: "0.6875rem",
-                        fontWeight: 900,
-                        boxShadow: "0 1px 3px rgba(0,0,0,0.15)",
-                      }}
-                    >
-                      ✕
-                    </div>
-                  </div>
-                );
-              }
 
               return (
                 <div
-                  key={target.id}
+                  key={`active-target-${target.id}`}
                   style={{
                     position: "absolute",
                     left: `${coords.xPercent}%`,
                     top: `${coords.yPercent}%`,
-                    transform: `translate(-50%, -50%) scale(${isActive ? 1.22 : 0.95})`,
+                    transform: "translate(-50%, -50%)",
                     pointerEvents: "none",
-                    zIndex: isActive ? 15 : 10,
+                    zIndex: 15,
                     display: "flex",
                     flexDirection: "column",
                     alignItems: "center",
-                    opacity: isActive ? 1.0 : 0.42,
-                    transition: isPopping || isDeflating ? "none" : "all 0.35s cubic-bezier(0.16, 1, 0.3, 1)",
                   }}
                 >
-                  {/* Radial Burst Particles (when popping upon success) */}
+                  {/* Radial Burst Particles (only during pop blast animation) */}
                   {isPopping && (
                     <div
                       style={{
@@ -2387,77 +2690,16 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                     </div>
                   )}
 
-                  {/* Active target radiant pulsing halo */}
-                  {isActive && !isPopping && !isDeflating && (
-                    <div
-                      style={{
-                        position: "absolute",
-                        top: "20px",
-                        width: "68px",
-                        height: "68px",
-                        borderRadius: "50%",
-                        border: `2px dashed ${target.color}`,
-                        background: `${target.color}20`,
-                        boxShadow: `0 0 20px ${target.color}75`,
-                        animation: "pulseRing 2.2s infinite ease-in-out",
-                        pointerEvents: "none",
-                        zIndex: -1,
-                      }}
-                    />
-                  )}
-
-                  {/* Active Target Banner Pill / Countdown Pill above Balloon */}
-                  {isActive && !isPopping && !isDeflating && (
-                    <div
-                      style={{
-                        position: "absolute",
-                        top: detectionState.isInTolerance ? "-38px" : "-20px",
-                        background: detectionState.isInTolerance ? "#059669" : target.color,
-                        color: "#FFFFFF",
-                        padding: detectionState.isInTolerance ? "3px 10px" : "2px 8px",
-                        borderRadius: "12px",
-                        fontSize: detectionState.isInTolerance ? "0.75rem" : "0.625rem",
-                        fontWeight: 900,
-                        letterSpacing: "0.05em",
-                        textTransform: "uppercase",
-                        boxShadow: detectionState.isInTolerance
-                          ? "0 2px 10px rgba(5,150,105,0.45)"
-                          : `0 2px 8px ${target.color}66`,
-                        whiteSpace: "nowrap",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "5px",
-                        userSelect: "none",
-                        zIndex: 20,
-                        transition: "all 0.2s ease",
-                      }}
-                    >
-                      {detectionState.isInTolerance ? (
-                        <>
-                          <span>HOLD</span>
-                          <span style={{ fontSize: "0.9375rem", color: "#FEF08A", fontWeight: 900 }}>
-                            {detectionState.holdSecondsCountdown}
-                          </span>
-                        </>
-                      ) : (
-                        <>
-                          <Target size={10} />
-                          <span>TARGET {currentTargetIndex + 1}</span>
-                        </>
-                      )}
-                    </div>
-                  )}
-
+                  {/* Completely Stationary Balloon (no float, drift or bounce; fixed at target position) */}
                   <div
                     className={
                       isPopping
                         ? "balloon-popping"
                         : isDeflating
                           ? "balloon-deflating"
-                          : "balloon-floating"
+                          : ""
                     }
                     style={{
-                      animationDelay: isPopping || isDeflating ? "0s" : target.floatDelay,
                       display: "flex",
                       flexDirection: "column",
                       alignItems: "center",
@@ -2471,9 +2713,7 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                       style={{
                         display: "block",
                         overflow: "visible",
-                        filter: isActive
-                          ? `drop-shadow(0 6px 14px ${target.color}80)`
-                          : "drop-shadow(0 2px 4px rgba(15, 23, 42, 0.12))",
+                        filter: `drop-shadow(0 4px 10px ${target.color}66)`,
                       }}
                     >
                       <defs>
@@ -2488,8 +2728,8 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                       <path
                         d="M 24 48 Q 19 54, 26 60 T 22 68"
                         fill="none"
-                        stroke={isActive ? target.colorDark : "#64748B"}
-                        strokeWidth={isActive ? "1.9" : "1.5"}
+                        stroke={target.colorDark}
+                        strokeWidth="1.9"
                         strokeLinecap="round"
                       />
 
@@ -2508,8 +2748,8 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                            C 35 44, 45 37, 45 26
                            C 45 14, 38 4, 24 4 Z"
                         fill={`url(#balloon-grad-${target.id})`}
-                        stroke={isActive ? "#FFFFFF" : "none"}
-                        strokeWidth={isActive ? "1.5" : "0"}
+                        stroke="#FFFFFF"
+                        strokeWidth="1.5"
                       />
 
                       {/* Glossy 2D Reflection Highlight */}
@@ -2520,7 +2760,7 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                         ry="8"
                         transform="rotate(-28 15 15)"
                         fill="#FFFFFF"
-                        opacity={isActive ? "0.55" : "0.35"}
+                        opacity="0.55"
                       />
 
                       {/* Visible Balloon Number (1, 2, 3, 4) */}
@@ -2544,7 +2784,7 @@ export const TargetAchievingGameExercise: React.FC<TargetAchievingGameExercisePr
                   </div>
                 </div>
               );
-            })}
+            })()}
           </VisualBalanceBoard>
         </div>
 

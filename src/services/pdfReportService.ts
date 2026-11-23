@@ -1,6 +1,8 @@
 import { BalanceSession } from "../types/session";
+import { PatientProfile } from "../types/patient";
 import { DirectionalWeightShiftSessionSummary } from "../utils/directionalWeightShiftExercise";
 import { LegRaiseSessionSummary } from "../utils/multimodalLegRaiseExercise";
+import { GameSessionSummary } from "../utils/targetAchievingGame";
 import { Pose2DAngleSessionReport } from "../utils/pose2dAngles";
 import { PdfReportGenerator } from "./pdfReportGenerator";
 import { Pose2DAngleReportService } from "./pose2dAngleReportService";
@@ -141,6 +143,56 @@ export class PdfReportService {
 
     const filename = `PatientBalanceAI_MultimodalLegRaiseReport_${summary.sessionId}.pdf`;
     const doc = PdfReportGenerator.generateMultimodalLegRaiseReport(summary);
+
+    let filePath = filename;
+
+    if (this.isTauri()) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const arrayBuffer = doc.output("arraybuffer");
+        const uint8Array = new Uint8Array(arrayBuffer);
+
+        const savedPath = await invoke<string>("save_pdf_report", {
+          filename,
+          pdfBytes: Array.from(uint8Array),
+        });
+
+        filePath = savedPath;
+      } catch (err) {
+        console.warn("Tauri save_pdf_report native write failed, falling back to browser download:", err);
+      }
+    }
+
+    try {
+      doc.save(filename);
+    } catch (saveErr) {
+      console.warn("doc.save fallback warning:", saveErr);
+    }
+
+    return {
+      filename,
+      filePath,
+      success: true,
+    };
+  }
+
+  /**
+   * Generates, saves to disk via Tauri (or browser download fallback),
+   * and returns the resulting Target Achieving Game report details.
+   */
+  public static async generateAndSaveTargetAchievingReport(
+    summary: GameSessionSummary,
+    patient?: PatientProfile,
+    sessionDate?: Date,
+    isRealHardware?: boolean
+  ): Promise<GeneratePdfResult> {
+    if (!summary) {
+      throw new Error("Invalid target achieving game session summary provided for PDF generation.");
+    }
+
+    const sessionId = summary.sessionId || `game_${Date.now()}`;
+    const filename = `PatientBalanceAI_TargetAchievingReport_${sessionId}.pdf`;
+    const doc = PdfReportGenerator.generateTargetAchievingGameReport(summary, patient, sessionDate, isRealHardware);
 
     let filePath = filename;
 

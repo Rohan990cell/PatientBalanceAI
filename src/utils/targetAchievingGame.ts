@@ -20,10 +20,22 @@ import { WII_BOARD_DIMENSIONS } from "../types/hardware";
 export const DEFAULT_TARGET_TOLERANCE_MM = 35.0;
 
 /**
- * Standard hold/dwell confirmation duration in milliseconds.
- * Mandatory 3-second continuous hold required to achieve balloon target.
+ * Standard center starting tolerance radius in physical millimetres around (0,0).
+ * Sized comfortably for natural bipedal stance (40.0 mm).
  */
-export const DEFAULT_CONFIRMATION_DURATION_MS = 3000;
+export const DEFAULT_CENTER_TOLERANCE_MM = 40.0;
+
+/**
+ * Required continuous hold duration at center to start the game in milliseconds.
+ * Mandatory 2.0 seconds (2000 ms).
+ */
+export const DEFAULT_CENTER_HOLD_DURATION_MS = 2000;
+
+/**
+ * Standard hold/dwell confirmation duration in milliseconds.
+ * Mandatory 2-second continuous hold required to achieve balloon target.
+ */
+export const DEFAULT_CONFIRMATION_DURATION_MS = 2000;
 
 /**
  * Standard time limit per active balloon in milliseconds.
@@ -184,6 +196,7 @@ export interface RecordedCopPoint {
 }
 
 export interface GameSessionSummary {
+  sessionId?: string;
   totalTargets: number; // Always 4
   completedTargets: number;
   missedTargets: number;
@@ -192,6 +205,10 @@ export interface GameSessionSummary {
   totalSessionDurationMs: number;
   targetAttempts: TargetAttemptResult[];
   trajectory: RecordedCopPoint[];
+  sessionDate?: string;
+  isRealHardware?: boolean;
+  patientName?: string;
+  patientId?: string;
 }
 
 /**
@@ -200,7 +217,14 @@ export interface GameSessionSummary {
 export function computeGameSessionSummary(
   targetAttempts: TargetAttemptResult[],
   trajectory: RecordedCopPoint[],
-  totalDurationMs: number
+  totalDurationMs: number,
+  metadata?: {
+    sessionId?: string;
+    sessionDate?: string;
+    isRealHardware?: boolean;
+    patientName?: string;
+    patientId?: string;
+  }
 ): GameSessionSummary {
   const totalTargets = 4;
   const completedAttempts = targetAttempts.filter((t) => t.status === "completed");
@@ -220,6 +244,7 @@ export function computeGameSessionSummary(
   }
 
   return {
+    sessionId: metadata?.sessionId,
     totalTargets,
     completedTargets,
     missedTargets,
@@ -228,7 +253,149 @@ export function computeGameSessionSummary(
     totalSessionDurationMs: Math.max(0, totalDurationMs),
     targetAttempts,
     trajectory,
+    sessionDate: metadata?.sessionDate,
+    isRealHardware: metadata?.isRealHardware,
+    patientName: metadata?.patientName,
+    patientId: metadata?.patientId,
   };
+}
+
+/**
+ * Detection result for the pre-start 2-second centre hold confirmation.
+ */
+export interface CenterDetectionResult {
+  isValid: boolean;
+  distanceMm: number | null;
+  isInCenterZone: boolean;
+  holdProgress: number; // 0.0 to 1.0
+  holdSecondsCountdown: number; // 2, 1 (0 when confirmed)
+  holdTimeRemainingMs: number; // 2000 ms down to 0 ms
+  isConfirmed: boolean;
+}
+
+/**
+ * Stateful detector for tracking the 2-second continuous centre hold requirement
+ * prior to activating and displaying Balloon 1.
+ */
+export class CenterPositionDetector {
+  private toleranceMm: number;
+  private holdDurationMs: number;
+  private enterTimestamp: number | null = null;
+  private isConfirmed: boolean = false;
+
+  constructor(
+    toleranceMm: number = DEFAULT_CENTER_TOLERANCE_MM,
+    holdDurationMs: number = DEFAULT_CENTER_HOLD_DURATION_MS
+  ) {
+    this.toleranceMm = toleranceMm;
+    this.holdDurationMs = holdDurationMs;
+  }
+
+  public reset(): void {
+    this.enterTimestamp = null;
+    this.isConfirmed = false;
+  }
+
+  public getToleranceMm(): number {
+    return this.toleranceMm;
+  }
+
+  public getHoldDurationMs(): number {
+    return this.holdDurationMs;
+  }
+
+  public getIsConfirmed(): boolean {
+    return this.isConfirmed;
+  }
+
+  public update(
+    copXMm: number | null | undefined,
+    copYMm: number | null | undefined,
+    timestamp: number,
+    isHardwareConnected: boolean = true,
+    isPaused: boolean = false
+  ): CenterDetectionResult {
+    if (this.isConfirmed) {
+      return {
+        isValid: isHardwareConnected && !isPaused,
+        distanceMm: calculatePhysicalCopDistance(copXMm, copYMm, 0, 0),
+        isInCenterZone: true,
+        holdProgress: 1.0,
+        holdSecondsCountdown: 0,
+        holdTimeRemainingMs: 0,
+        isConfirmed: true,
+      };
+    }
+
+    // Hardware disconnect or clinician pause: pause & reset dwell safely
+    if (!isHardwareConnected || isPaused) {
+      this.enterTimestamp = null;
+      return {
+        isValid: false,
+        distanceMm: null,
+        isInCenterZone: false,
+        holdProgress: 0.0,
+        holdSecondsCountdown: Math.ceil(this.holdDurationMs / 1000),
+        holdTimeRemainingMs: this.holdDurationMs,
+        isConfirmed: false,
+      };
+    }
+
+    const dist = calculatePhysicalCopDistance(copXMm, copYMm, 0, 0);
+    // Invalid or missing readings must never count toward confirmation
+    if (dist === null) {
+      this.enterTimestamp = null;
+      return {
+        isValid: false,
+        distanceMm: null,
+        isInCenterZone: false,
+        holdProgress: 0.0,
+        holdSecondsCountdown: Math.ceil(this.holdDurationMs / 1000),
+        holdTimeRemainingMs: this.holdDurationMs,
+        isConfirmed: false,
+      };
+    }
+
+    const isInCenterZone = dist <= this.toleranceMm;
+
+    if (isInCenterZone) {
+      if (this.enterTimestamp === null) {
+        this.enterTimestamp = timestamp;
+      }
+
+      const dwellTime = Math.max(0, timestamp - this.enterTimestamp);
+      const holdProgress = Math.min(1.0, dwellTime / this.holdDurationMs);
+      const holdTimeRemainingMs = Math.max(0, this.holdDurationMs - dwellTime);
+      const isConfirmed = dwellTime >= this.holdDurationMs;
+      const holdSecondsCountdown = isConfirmed ? 0 : Math.max(1, Math.ceil(holdTimeRemainingMs / 1000));
+
+      if (isConfirmed) {
+        this.isConfirmed = true;
+      }
+
+      return {
+        isValid: true,
+        distanceMm: dist,
+        isInCenterZone: true,
+        holdProgress,
+        holdSecondsCountdown,
+        holdTimeRemainingMs,
+        isConfirmed,
+      };
+    }
+
+    // Outside centre tolerance zone: immediately reset dwell & countdown
+    this.enterTimestamp = null;
+    return {
+      isValid: true,
+      distanceMm: dist,
+      isInCenterZone: false,
+      holdProgress: 0.0,
+      holdSecondsCountdown: Math.ceil(this.holdDurationMs / 1000),
+      holdTimeRemainingMs: this.holdDurationMs,
+      isConfirmed: false,
+    };
+  }
 }
 
 /**
