@@ -201,6 +201,45 @@ pub fn get_reports_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn get_downloads_dir() -> Result<PathBuf, String> {
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        return Ok(PathBuf::from(user_profile).join("Downloads"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Ok(PathBuf::from(home).join("Downloads"));
+    }
+    std::env::current_dir()
+        .map_err(|e| format!("Failed to resolve Downloads directory: {e}"))
+        .map(|p| p.join("Downloads"))
+}
+
+/// Save a binary file (e.g. exercise session video) into the user's Downloads folder.
+pub fn save_download_file(filename: &str, file_bytes: &[u8]) -> Result<String, String> {
+    let downloads = get_downloads_dir()?;
+    if !downloads.exists() {
+        fs::create_dir_all(&downloads)
+            .map_err(|e| format!("Failed to create Downloads directory: {e}"))?;
+    }
+
+    let trimmed = filename.trim();
+    let (stem, ext) = if let Some((s, e)) = trimmed.rsplit_once('.') {
+        (s, e)
+    } else {
+        (trimmed, "bin")
+    };
+    let safe_stem = sanitize_filename(stem);
+    let safe_ext = sanitize_filename(ext);
+    let final_path = downloads.join(format!("{safe_stem}.{safe_ext}"));
+    let temp_path = downloads.join(format!("{safe_stem}.{safe_ext}.tmp"));
+
+    fs::write(&temp_path, file_bytes)
+        .map_err(|e| format!("Failed to write temporary download file: {e}"))?;
+    fs::rename(&temp_path, &final_path)
+        .map_err(|e| format!("Failed to finalize download file: {e}"))?;
+
+    Ok(final_path.to_string_lossy().to_string())
+}
+
 pub fn save_pdf_report(app: &AppHandle, filename: &str, pdf_bytes: &[u8]) -> Result<String, String> {
     let reports_dir = get_reports_dir(app)?;
     let safe_name = sanitize_filename(filename.trim_end_matches(".pdf"));

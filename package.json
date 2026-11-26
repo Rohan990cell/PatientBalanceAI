@@ -33,8 +33,10 @@
     "@tauri-apps/api": "^2.1.1",
     "@types/three": "^0.186.0",
     "clsx": "^2.1.1",
+    "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",
     "lucide-react": "^1.16.0",
+    "mediabunny": "^1.66.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "three": "^0.186.1"
