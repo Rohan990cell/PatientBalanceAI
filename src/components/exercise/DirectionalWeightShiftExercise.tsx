@@ -36,6 +36,7 @@ import { useBalanceBoard } from "../../context/HardwareContext";
 import { useVision } from "../../context/VisionContext";
 import { LiveJointAnglePanel } from "../vision/LiveJointAnglePanel";
 import { Pose2DAngleSyncReport } from "../vision/Pose2DAngleSyncReport";
+import { TransitAngleBoxPlotPanel } from "../vision/TransitAngleBoxPlotPanel";
 import { HoldWindowMovementGraph } from "./HoldWindowMovementGraph";
 // CenterStanceVectorPanel is rendered inside Pose2DAngleSyncReport
 import {
@@ -46,6 +47,7 @@ import {
   BoardSyncedPose2DSnapshot,
   Pose2DAngleSessionReport,
   Pose2DAngleTimelineSample,
+  Pose2DAngles,
   TransitAngleBoxPlot,
   CenterStanceSnapshot,
 } from "../../utils/pose2dAngles";
@@ -54,6 +56,8 @@ import {
   DirectionalTarget,
   DirectionalTargetName,
   DEFAULT_DIRECTIONAL_DURATIONS,
+  DEFAULT_DIRECTIONAL_TOLERANCES_MM,
+  DIRECTIONAL_TOLERANCE_MM_BOUNDS,
   getDirectionalTargets,
   getRandomizedFarDirectionalTargets,
   getCenterStartGateTarget,
@@ -74,6 +78,10 @@ import {
   BaselineCalibrationCollector,
   WII_BOARD_DIMENSIONS,
   CopRollingFilter,
+  targetCircleSizePercent,
+  targetCircleRadiiPercent,
+  calculateCopDistanceToTargetMm,
+  calculateCopPathLengthMm,
   HoldWindowFrameSample,
   HoldWindowErrorSeries,
   computeHoldFrameTargetError,
@@ -82,6 +90,35 @@ import {
 import { PdfReportService } from "../../services/pdfReportService";
 import { Pose2DAngleReportService } from "../../services/pose2dAngleReportService";
 import { PatientProfile } from "../../types/patient";
+import { TargetGameAudioService } from "../../utils/targetGameAudio";
+import { ExerciseRegionRecorder } from "../../services/exerciseRegionRecorder";
+import {
+  LiveBoardRecordState,
+  paintLiveBoardRecord,
+  RECORD_BOARD_BLEED_PX,
+} from "../../services/paintLiveBoardRecord";
+import {
+  LiveInstructionsRecordState,
+  paintLiveInstructionsRecord,
+} from "../../services/paintLiveInstructionsRecord";
+import {
+  buildSessionRewardSummary,
+  computeLiveTargetRewardScores,
+  REWARD_SCORE_INFO,
+} from "../../utils/directionalRewardScores";
+
+type LiveRewardPopup = {
+  id: string;
+  xPercent: number;
+  yPercent: number;
+  pathScore: number;
+  missScore: number;
+  color: string;
+};
+import {
+  DirectionalTargetBalloon,
+  BalloonBurstParticle,
+} from "./DirectionalTargetBalloon";
 
 interface DirectionalWeightShiftExerciseProps {
   patient?: PatientProfile;
@@ -419,7 +456,24 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
   const [sensorsReady, setSensorsReady] = useState(false);
   const [angleSyncReport, setAngleSyncReport] = useState<Pose2DAngleSessionReport | null>(null);
   const [transitAngleBoxPlots, setTransitAngleBoxPlots] = useState<TransitAngleBoxPlot[] | null>(null);
+  /** Center-stance (T0) angles — all transit box plots use Δ = sample − T0 */
+  const centerStanceAnglesRef = useRef<Pose2DAngles | null>(null);
   const [centerStanceSnapshot, setCenterStanceSnapshot] = useState<CenterStanceSnapshot | null>(null);
+  /** Balloon pop audio + blast FX for live targets */
+  const balloonAudioRef = useRef(new TargetGameAudioService(false));
+  const [poppingTargetId, setPoppingTargetId] = useState<string | null>(null);
+  const [balloonBurstParticles, setBalloonBurstParticles] = useState<BalloonBurstParticle[]>([]);
+  const [liveRewardPopup, setLiveRewardPopup] = useState<LiveRewardPopup | null>(null);
+  const rewardPopupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Silent board+camera session video → Downloads on finish */
+  const exerciseRecordRegionRef = useRef<HTMLDivElement>(null);
+  // Full HD @ 20fps — live board canvas every frame (no laggy html2canvas of board)
+  const regionRecorderRef = useRef(new ExerciseRegionRecorder({ fps: 20, scale: 1 }));
+  const recordBoardCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const recordBoardStateRef = useRef<LiveBoardRecordState | null>(null);
+  const recordInstructionsCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const recordInstructionsStateRef = useRef<LiveInstructionsRecordState | null>(null);
+  const sessionVideoSavingRef = useRef(false);
   const [angleReportSavePath, setAngleReportSavePath] = useState<string | null>(null);
   const [angleReportSaveError, setAngleReportSaveError] = useState<string | null>(null);
   const [isSavingAngleReport, setIsSavingAngleReport] = useState(false);
@@ -437,24 +491,35 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
     [showLiveAngles, visionState.pose, visionState.fps, visionState.hasPose]
   );
 
-  // Configurable hold durations per target (seconds)
+  // Configurable hold durations + hit-zone sizes per target
   const [customDurations, setCustomDurations] = useState<Record<DirectionalTargetName, number>>({
     ...DEFAULT_DIRECTIONAL_DURATIONS,
   });
+  const [customTolerancesMm, setCustomTolerancesMm] = useState<Record<DirectionalTargetName, number>>({
+    ...DEFAULT_DIRECTIONAL_TOLERANCES_MM,
+  });
   const [showDurationConfig, setShowDurationConfig] = useState(false);
+  const targetConfigOverrides = useMemo(
+    () => ({ customTolerancesMm }),
+    [customTolerancesMm]
+  );
 
   // Baseline calibration state (skipped — board origin used; kept for relative COP math)
   const [calibrationBaseline, setCalibrationBaseline] = useState<DirectionalCalibrationBaseline | null>(null);
 
   // Session targets: randomized far layout locked in when the patient starts
   const [targets, setTargets] = useState<DirectionalTarget[]>(() =>
-    getDirectionalTargets(customDurations, undefined, null)
+    getDirectionalTargets(customDurations, { customTolerancesMm }, null)
   );
   const targetsRef = useRef(targets);
   targetsRef.current = targets;
   const centerGateTarget = useMemo(
-    () => getCenterStartGateTarget(calibrationBaseline),
-    [calibrationBaseline]
+    () =>
+      getCenterStartGateTarget(
+        calibrationBaseline,
+        customTolerancesMm["RETURN TO CENTER"]
+      ),
+    [calibrationBaseline, customTolerancesMm]
   );
   const pendingBaselineRef = useRef<DirectionalCalibrationBaseline | null>(null);
 
@@ -503,10 +568,41 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
 
   // Clean-up on unmount ensures sidebar is always restored
   useEffect(() => {
+    const balloonAudio = balloonAudioRef.current;
+    const regionRecorder = regionRecorderRef.current;
     return () => {
       onResultFullScreenChange?.(false);
+      balloonAudio.dispose();
+      if (rewardPopupTimerRef.current) clearTimeout(rewardPopupTimerRef.current);
+      if (regionRecorder.isRecording) {
+        void regionRecorder.stop({ save: true, filename: `PatientBalanceAI_Exercise_${Date.now()}` });
+      }
     };
   }, [onResultFullScreenChange]);
+
+  const persistSessionVideo = async (tag: string) => {
+    if (!regionRecorderRef.current.isRecording || sessionVideoSavingRef.current) return;
+    sessionVideoSavingRef.current = true;
+    try {
+      await regionRecorderRef.current.stop({
+        save: true,
+        filename: `PatientBalanceAI_Exercise_${tag}`,
+      });
+    } catch (err) {
+      console.warn("Exercise region video save failed:", err);
+    } finally {
+      sessionVideoSavingRef.current = false;
+    }
+  };
+
+  const beginSilentSessionRecording = () => {
+    // Wait one frame so the instruction + board + camera layout is mounted
+    window.setTimeout(() => {
+      const el = exerciseRecordRegionRef.current;
+      if (!el) return;
+      void regionRecorderRef.current.start(el);
+    }, 400);
+  };
 
   const handleBackToDashboard = () => {
     onResultFullScreenChange?.(false);
@@ -643,6 +739,20 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
     return mapCopToBoard(liveCopX, liveCopY);
   }, [liveCopX, liveCopY]);
 
+  const paintRecordBoardCanvas = () => {
+    const canvas = recordBoardCanvasRef.current;
+    const snap = recordBoardStateRef.current;
+    if (!canvas || !snap || !regionRecorderRef.current.isRecording) return;
+    paintLiveBoardRecord(canvas, snap);
+  };
+
+  const paintRecordInstructionsCanvas = () => {
+    const canvas = recordInstructionsCanvasRef.current;
+    const snap = recordInstructionsStateRef.current;
+    if (!canvas || !snap || !regionRecorderRef.current.isRecording) return;
+    paintLiveInstructionsRecord(canvas, snap);
+  };
+
   // Imperative ball position — avoids an extra setState on top of hardware updates
   useEffect(() => {
     const el = copBallRef.current;
@@ -652,6 +762,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
         el.style.left = "50%";
         el.style.top = "50%";
       }
+      paintRecordBoardCanvas();
       return;
     }
     const now = Date.now();
@@ -664,6 +775,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
       el.style.left = `${xPercent}%`;
       el.style.top = `${yPercent}%`;
     }
+    paintRecordBoardCanvas();
   }, [isRealConnected, isSimulationMode, liveCopX, liveCopY, targetBoardCoords.xPercent, targetBoardCoords.yPercent]);
 
   // Guidance evaluation — require patient load so empty-board COP (0,0) cannot count as on-target
@@ -967,7 +1079,10 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
   const [sessionSummary, setSessionSummary] = useState<DirectionalWeightShiftSessionSummary | null>(null);
   const [showDetailedModal, setShowDetailedModal] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [isSavingVisualReport, setIsSavingVisualReport] = useState(false);
   const [pdfExportResult, setPdfExportResult] = useState<{ filename: string; filePath: string } | null>(null);
+  /** DOM node of the COP path board — captured as PNG for landscape Save Report */
+  const resultBoardRef = useRef<HTMLDivElement>(null);
   const [pdfExportError, setPdfExportError] = useState<string | null>(null);
 
   // Live travel path — keep only a tiny recent tail (not a long history)
@@ -979,6 +1094,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
     holdWindowBufferRef.current = [];
     holdRecordingStartedRef.current = false;
     holdWindowOriginMsRef.current = null;
+    regionRecorderRef.current.invalidateChrome();
   }, [currentTargetIndex, phase]);
 
   useEffect(() => {
@@ -1013,9 +1129,10 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
           .join(" ")
       );
     }
+    paintRecordBoardCanvas();
   }, [phase, isRealConnected, isSimulationMode, liveCopX, liveCopY, targetBoardCoords.xPercent, targetBoardCoords.yPercent]);
 
-  // Distinct RGB per target step (no shared hues across 1–7)
+  // Distinct RGB per target step (1–6 + Target 0 center)
   const PATH_STEP_COLORS = [
     "#E11D48", // 1 rose
     "#EA580C", // 2 orange
@@ -1023,24 +1140,105 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
     "#7C3AED", // 4 violet
     "#059669", // 5 emerald
     "#DB2777", // 6 pink
-    "#0891B2", // 7 cyan
+    "#0891B2", // 0 center cyan
   ] as const;
 
   const pathColorForStep = (step: number): string =>
-    PATH_STEP_COLORS[(Math.max(1, step) - 1) % PATH_STEP_COLORS.length];
+    step === 0
+      ? PATH_STEP_COLORS[6]
+      : PATH_STEP_COLORS[(Math.max(1, step) - 1) % 6];
+
+  // Keep live board-record snapshot fresh for smooth MP4 board (camera-rate)
+  recordBoardStateRef.current = {
+    phase,
+    currentTargetIndex,
+    holdProgress,
+    centerHoldProgress,
+    isWithinTargetZone,
+    poppingTargetId,
+    particles: balloonBurstParticles,
+    targets,
+    centerGate: centerGateTarget,
+    ball: visualBallPosRef.current,
+    trail: activeTrailPointsRef.current,
+    reward: liveRewardPopup,
+    showCop: Boolean(
+      (isRealConnected || isSimulationMode) && liveCopX !== null && liveCopY !== null
+    ),
+    pathColorForStep,
+  };
+
+  const progressPctLive = phase === "CENTER_HOLD" ? centerHoldProgress : holdProgress;
+  const requiredHoldSec =
+    phase === "CENTER_HOLD"
+      ? CENTER_START_HOLD_SECONDS
+      : currentTarget?.requiredHoldDurationSeconds ?? 2;
+  recordInstructionsStateRef.current = {
+    phase,
+    stepTag:
+      phase === "CENTER_HOLD"
+        ? sensorsReady
+          ? "Target 0 · Center Stance"
+          : "Waiting Board + Camera"
+        : `Target ${currentTarget?.stepNumber ?? currentTargetIndex + 1} · ${currentTargetIndex + 1}/${targets.length} · ${currentTarget?.shortLabel ?? ""}`,
+    title:
+      phase === "CENTER_HOLD"
+        ? sensorsReady
+          ? "TARGET 0 — STAND IN CENTER"
+          : "WAITING FOR SENSORS"
+        : currentTarget?.stepNumber === 0
+          ? "RETURN TO TARGET 0 (CENTER)"
+          : currentTarget?.name ?? "DIRECTIONAL SHIFT",
+    subtitle:
+      phase === "CENTER_HOLD"
+        ? sensorsReady
+          ? `Hold center for ${CENTER_START_HOLD_SECONDS}s. When it ends, the shared clock starts and Target 1 begins.`
+          : "Stand on the board and face the camera until both are live — then the 3s center hold can start."
+        : currentTarget?.instruction ?? "",
+    guidance: guidance.guidanceMessage,
+    showGoodBadge,
+    isWithinTargetZone,
+    isBoardWaiting: Boolean(guidance.isBoardWaiting),
+    holdProgress: progressPctLive,
+    holdLabel:
+      phase === "CENTER_HOLD"
+        ? `Center Hold (${CENTER_START_HOLD_SECONDS}s to Start)`
+        : `Hold Duration (${requiredHoldSec}s Required)`,
+    holdTimeText: `${Math.min(
+      requiredHoldSec,
+      (progressPctLive / 100) * requiredHoldSec
+    ).toFixed(1)}s / ${requiredHoldSec}s`,
+  };
+
+  useEffect(() => {
+    let raf = 0;
+    let alive = true;
+    const tick = () => {
+      if (!alive) return;
+      if (regionRecorderRef.current.isRecording) {
+        paintRecordBoardCanvas();
+        paintRecordInstructionsCanvas();
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      alive = false;
+      cancelAnimationFrame(raf);
+    };
+  }, []);
 
   /**
    * Split COP trail into travel (solid) vs inside-target (dotted).
-   * Inside uses the same geometric zone as the drawn tolerance ellipse
-   * (norm distance ≤ tolerance) — not the jitter-buffered tracker flag.
+   * Inside = true circle in mm (√(dx²+dy²) ≤ toleranceMm).
    */
   const buildInsideOutsideSegments = (
     samples: Array<{ copX: number; copY: number; isInside?: boolean }>,
     targetX: number,
     targetY: number,
-    tolerance: number
+    toleranceMm: number
   ): Array<{ isInside: boolean; points: Array<{ xPercent: number; yPercent: number }> }> => {
-    const tol = Math.max(0.01, tolerance || 0.16);
+    const tolMm = Math.max(1, toleranceMm || 40);
     const segments: Array<{
       isInside: boolean;
       points: Array<{ xPercent: number; yPercent: number }>;
@@ -1049,8 +1247,8 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
       if (typeof s.copX !== "number" || typeof s.copY !== "number") continue;
       if (!Number.isFinite(s.copX) || !Number.isFinite(s.copY)) continue;
       const pt = mapCopToBoard(s.copX, s.copY);
-      const dist = Math.hypot(s.copX - targetX, s.copY - targetY);
-      const isInside = dist <= tol;
+      const distMm = calculateCopDistanceToTargetMm(s.copX, s.copY, targetX, targetY) ?? Number.POSITIVE_INFINITY;
+      const isInside = distMm <= tolMm;
       const last = segments[segments.length - 1];
       if (!last || last.isInside !== isInside) {
         const bridged = last?.points.length ? [last.points[last.points.length - 1], pt] : [pt];
@@ -1062,56 +1260,6 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
     return segments.filter((seg) => seg.points.length >= 2);
   };
 
-  /**
-   * Break a polyline into short dash pieces so "dotted" stays visible even when
-   * the board SVG uses preserveAspectRatio="none" (strokeDasharray gets crushed).
-   */
-  const toDottedPieces = (
-    points: Array<{ xPercent: number; yPercent: number }>,
-    dashLen = 1.35,
-    gapLen = 1.15
-  ): Array<Array<{ xPercent: number; yPercent: number }>> => {
-    if (points.length < 2) return [];
-    const pieces: Array<Array<{ xPercent: number; yPercent: number }>> = [];
-    let drawing = true;
-    let budget = dashLen;
-    let piece: Array<{ xPercent: number; yPercent: number }> = [{ ...points[0] }];
-    let cursor = { ...points[0] };
-
-    for (let i = 1; i < points.length; i++) {
-      let remaining = Math.hypot(
-        points[i].xPercent - cursor.xPercent,
-        points[i].yPercent - cursor.yPercent
-      );
-      let tx = points[i].xPercent - cursor.xPercent;
-      let ty = points[i].yPercent - cursor.yPercent;
-
-      while (remaining > 1e-6) {
-        const step = Math.min(budget, remaining);
-        const u = step / remaining;
-        const next = {
-          xPercent: cursor.xPercent + tx * u,
-          yPercent: cursor.yPercent + ty * u,
-        };
-        if (drawing) {
-          piece.push(next);
-        }
-        cursor = next;
-        tx = points[i].xPercent - cursor.xPercent;
-        ty = points[i].yPercent - cursor.yPercent;
-        remaining -= step;
-        budget -= step;
-        if (budget <= 1e-6) {
-          if (drawing && piece.length >= 2) pieces.push(piece);
-          drawing = !drawing;
-          budget = drawing ? dashLen : gapLen;
-          piece = drawing ? [{ ...cursor }] : [];
-        }
-      }
-    }
-    if (drawing && piece.length >= 2) pieces.push(piece);
-    return pieces;
-  };
 
   /** Small direction arrows along a polyline (viewBox % space). */
   const samplePathArrows = (
@@ -1216,7 +1364,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
         t.samples,
         t.targetX,
         t.targetY,
-        t.tolerance
+        t.toleranceMm ?? t.tolerance * WII_BOARD_DIMENSIONS.halfDistanceXMm
       );
       const prev = index > 0 ? sessionSummary.targets[index - 1] : null;
       const transitSeconds = computeApproachTransitSeconds(t, prev);
@@ -1228,24 +1376,11 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
       const approachSeg = pathSegments.find((seg) => !seg.isInside) ?? pathSegments[0];
       const transitLabelPos = approachSeg ? midpointOfPoints(approachSeg.points) : null;
 
-      // Closest recorded COP to target center — the "hit" marker on the result board
-      let achievementPoint: { xPercent: number; yPercent: number } | null = null;
-      let bestDist = Number.POSITIVE_INFINITY;
-      for (const s of t.samples) {
-        if (typeof s.copX !== "number" || typeof s.copY !== "number") continue;
-        const d =
-          typeof s.distanceNorm === "number" && !Number.isNaN(s.distanceNorm)
-            ? s.distanceNorm
-            : Math.hypot(s.copX - t.targetX, s.copY - t.targetY);
-        if (d < bestDist) {
-          bestDist = d;
-          achievementPoint = mapCopToBoard(s.copX, s.copY);
-        }
-      }
       return {
         name: t.name,
         shortLabel: t.shortLabel,
         stepNumber: t.stepNumber,
+        fromStep: prev ? prev.stepNumber : Math.max(0, t.stepNumber - 1),
         color: pathColorForStep(t.stepNumber),
         isCompleted: t.isCompleted,
         isTargetReached: Boolean(t.isTargetReached),
@@ -1260,13 +1395,19 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
         arrows,
         transitSeconds,
         transitLabelPos,
-        achievementPoint,
         targetBoardPos: mapCopToBoard(t.targetX, t.targetY),
         tolerance: t.tolerance,
+        toleranceMm: t.toleranceMm ?? t.tolerance * WII_BOARD_DIMENSIONS.halfDistanceXMm,
       };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionSummary]);
+
+  /** UI-only 1–10 path + miss rewards (not exported to PDF). */
+  const rewardSummary = useMemo(
+    () => (sessionSummary ? buildSessionRewardSummary(sessionSummary) : null),
+    [sessionSummary]
+  );
 
   // When results load, show every path by default; keep prior picks if same steps
   useEffect(() => {
@@ -1302,9 +1443,43 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
     });
   };
 
+  const handleToleranceChange = (name: DirectionalTargetName, delta: number) => {
+    setCustomTolerancesMm((prev) => {
+      const current = prev[name] ?? DEFAULT_DIRECTIONAL_TOLERANCES_MM[name];
+      const next = Math.max(
+        DIRECTIONAL_TOLERANCE_MM_BOUNDS.min,
+        Math.min(DIRECTIONAL_TOLERANCE_MM_BOUNDS.max, current + delta)
+      );
+      return { ...prev, [name]: next };
+    });
+  };
+
   const handleResetDurations = () => {
     setCustomDurations({ ...DEFAULT_DIRECTIONAL_DURATIONS });
+    setCustomTolerancesMm({ ...DEFAULT_DIRECTIONAL_TOLERANCES_MM });
   };
+
+  // Keep circle (and balloon) size in sync with mm tolerance — READY rebuilds
+  // layout; during play only toleranceMm updates so balloons resize with the ring.
+  useEffect(() => {
+    if (phase === "COMPLETED") return;
+    if (phase === "READY") {
+      setTargets(getDirectionalTargets(customDurations, targetConfigOverrides, null));
+      return;
+    }
+    setTargets((prev) =>
+      prev.map((t) => {
+        const tolMm = customTolerancesMm[t.name];
+        if (typeof tolMm !== "number" || !Number.isFinite(tolMm)) return t;
+        if (t.toleranceMm === tolMm) return t;
+        return {
+          ...t,
+          toleranceMm: tolMm,
+          tolerance: tolMm / WII_BOARD_DIMENSIONS.halfDistanceXMm,
+        };
+      })
+    );
+  }, [phase, customDurations, targetConfigOverrides, customTolerancesMm]);
 
   // Keep latest sensor + 2D pose angles in refs so the hold timer can sample on a steady clock
   // and board-target completion can snapshot angles in the same instant.
@@ -1489,7 +1664,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
         // Hold complete → freeze frames from first border hit → completion, then STOP
         const holdSeries = buildHoldWindowErrorSeries({
           targetId: targetForHold.id,
-          stepNumber: targetForHold.stepNumber || currentTargetIndex + 1,
+          stepNumber: targetForHold.stepNumber ?? currentTargetIndex + 1,
           targetName: targetForHold.name,
           shortLabel: targetForHold.shortLabel,
           requiredHoldDurationSeconds: targetForHold.requiredHoldDurationSeconds,
@@ -1505,7 +1680,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
         const latestVision = getLatestVisionStateRef.current();
         const snapAngles = calculatePose2DAngles(latestVision.pose, nowTs);
         angleSnapshotsRef.current.push({
-          stepNumber: targetForHold.stepNumber || currentTargetIndex + 1,
+          stepNumber: targetForHold.stepNumber ?? currentTargetIndex + 1,
           targetIndex: currentTargetIndex,
           targetId: targetForHold.id,
           targetName: targetForHold.name,
@@ -1527,9 +1702,82 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
         const newCompletedCount = telem.completedCount + 1;
         setCompletedCount(newCompletedCount);
 
+        // Balloon blast + pop sound at the target center
+        setPoppingTargetId(targetForHold.id);
+        balloonAudioRef.current.getContext();
+        balloonAudioRef.current.playBalloonPop();
+        const blastColor = pathColorForStep(targetForHold.stepNumber);
+        setBalloonBurstParticles(
+          Array.from({ length: 14 }, (_, i) => {
+            const angle = (i / 14) * Math.PI * 2;
+            const dist = 28 + (i % 3) * 14;
+            return {
+              id: i,
+              dx: Math.cos(angle) * dist,
+              dy: Math.sin(angle) * dist,
+              size: 5 + (i % 4),
+              color: i % 2 === 0 ? blastColor : "#FFFFFF",
+            };
+          })
+        );
+
+        // Live +path / +miss reward float at the achieved target
+        const boardPos = mapCopToBoard(targetForHold.x, targetForHold.y);
+        const prevTarget =
+          currentTargetIndex > 0 ? targetsRef.current[currentTargetIndex - 1] : null;
+        const currMm = {
+          x:
+            typeof targetForHold.targetXMm === "number"
+              ? targetForHold.targetXMm
+              : targetForHold.x * WII_BOARD_DIMENSIONS.halfDistanceXMm,
+          y:
+            typeof targetForHold.targetYMm === "number"
+              ? targetForHold.targetYMm
+              : targetForHold.y * WII_BOARD_DIMENSIONS.halfDistanceYMm,
+        };
+        const prevMm = prevTarget
+          ? {
+              x:
+                typeof prevTarget.targetXMm === "number"
+                  ? prevTarget.targetXMm
+                  : prevTarget.x * WII_BOARD_DIMENSIONS.halfDistanceXMm,
+              y:
+                typeof prevTarget.targetYMm === "number"
+                  ? prevTarget.targetYMm
+                  : prevTarget.y * WII_BOARD_DIMENSIONS.halfDistanceYMm,
+            }
+          : { x: 0, y: 0 };
+        const shortestPathMm = Math.hypot(currMm.x - prevMm.x, currMm.y - prevMm.y);
+        const trackerSamples =
+          trackersRef.current[currentTargetIndex]?.assessment?.samples ?? [];
+        const actualPathMm = calculateCopPathLengthMm(trackerSamples);
+        const liveScores = computeLiveTargetRewardScores({
+          shortestPathMm,
+          actualPathMm,
+          meanMissMm: holdSeries.meanErrorMm,
+          toleranceMm:
+            targetForHold.toleranceMm ??
+            (targetForHold.tolerance || 0.16) * WII_BOARD_DIMENSIONS.halfDistanceXMm,
+        });
+        if (rewardPopupTimerRef.current) clearTimeout(rewardPopupTimerRef.current);
+        setLiveRewardPopup({
+          id: `${targetForHold.id}-${Date.now()}`,
+          xPercent: boardPos.xPercent,
+          yPercent: boardPos.yPercent,
+          pathScore: liveScores.pathScore,
+          missScore: liveScores.missScore,
+          color: blastColor,
+        });
+        rewardPopupTimerRef.current = setTimeout(() => {
+          setLiveRewardPopup(null);
+          rewardPopupTimerRef.current = null;
+        }, 1800);
+
         setTimeout(() => {
           setShowGoodBadge(false);
           setHoldProgress(0);
+          setPoppingTargetId(null);
+          setBalloonBurstParticles([]);
 
           if (currentTargetIndex + 1 < telem.targetsLength) {
             const nextIdx = currentTargetIndex + 1;
@@ -1540,7 +1788,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
             isAdvancingRef.current = false;
             finishSession(newCompletedCount);
           }
-        }, 900);
+        }, 700);
       }
     }, 50);
 
@@ -1576,6 +1824,9 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
   const finishSession = (finalCompletedCount?: number) => {
     const finalCount = typeof finalCompletedCount === "number" ? finalCompletedCount : completedCount;
     setPhase("COMPLETED");
+
+    // Stop silent region recording and auto-save to Downloads
+    void persistSessionVideo(`session_${Date.now()}`);
 
     // Finalize all target trackers up to this point
     const finalizedAssessments = trackersRef.current.map((t) => t.finalize());
@@ -1639,7 +1890,8 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
         })),
         completionTimeSeconds: t.completionTimeSeconds,
       })),
-      angleTimelineRef.current
+      angleTimelineRef.current,
+      centerStanceAnglesRef.current ?? centerStanceSnapshot?.angles ?? null
     );
     setTransitAngleBoxPlots(transitPlots);
 
@@ -1693,6 +1945,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
     setSensorsReady(false);
     setAngleSyncReport(null);
     setTransitAngleBoxPlots(null);
+    centerStanceAnglesRef.current = null;
     setCenterStanceSnapshot(null);
     setAngleReportSavePath(null);
     setAngleReportSaveError(null);
@@ -1718,7 +1971,11 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
     pendingBaselineRef.current = skippedBaseline;
 
     // Lock in a new random far target sequence for this session
-    const randomized = getRandomizedFarDirectionalTargets(customDurations, skippedBaseline);
+    const randomized = getRandomizedFarDirectionalTargets(
+      customDurations,
+      skippedBaseline,
+      targetConfigOverrides
+    );
     setTargets(randomized);
     targetsRef.current = randomized;
     trackersRef.current = randomized.map((t) => new DirectionalTargetTracker(t, skippedBaseline));
@@ -1740,6 +1997,9 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
         }
       }
     })();
+
+    // Silent auto-record of instruction + board + camera → Downloads on finish
+    beginSilentSessionRecording();
   };
 
   // Keep video/canvas attached while exercise is running
@@ -1852,65 +2112,97 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
         clearInterval(interval);
         setCenterHoldProgress(100);
 
-        // 3s done → lock shared T0 and start Target 1 on the same clock
-        const t0 = Date.now();
-        syncEpochRef.current = t0;
-        sessionStartTimeRef.current = t0;
-
-        // Snapshot person image + angle vectors + mid-hip at center-hold complete
-        try {
-          const visionAtT0 = getLatestVisionStateRef.current();
-          const canvas = cameraCanvasRef.current;
-          const video = cameraVideoRef.current;
-          let imageDataUrl: string | null = null;
-          let imageWidth = 0;
-          let imageHeight = 0;
-          if (canvas && canvas.width > 0 && canvas.height > 0) {
-            imageWidth = canvas.width;
-            imageHeight = canvas.height;
-            try {
-              imageDataUrl = canvas.toDataURL("image/jpeg", 0.88);
-            } catch {
-              imageDataUrl = null;
-            }
-          }
-          // Fallback: grab a frame from the live video if canvas export failed
-          if (
-            !imageDataUrl &&
-            video &&
-            video.videoWidth > 0 &&
-            video.videoHeight > 0
-          ) {
-            try {
-              const tmp = document.createElement("canvas");
-              tmp.width = video.videoWidth;
-              tmp.height = video.videoHeight;
-              const ctx = tmp.getContext("2d");
-              ctx?.drawImage(video, 0, 0);
-              imageWidth = tmp.width;
-              imageHeight = tmp.height;
-              imageDataUrl = tmp.toDataURL("image/jpeg", 0.88);
-            } catch {
-              // keep null
-            }
-          }
-          const stance = buildCenterStanceSnapshot({
-            pose: visionAtT0.pose,
-            imageDataUrl,
-            imageWidth,
-            imageHeight,
-            isMirrored,
-            timestamp: t0,
-          });
-          setCenterStanceSnapshot(stance);
-        } catch {
-          setCenterStanceSnapshot(null);
+        // Center balloon blast, then lock T0 and start Target 1
+        if (gate) {
+          setPoppingTargetId(gate.id);
+          balloonAudioRef.current.getContext();
+          balloonAudioRef.current.playBalloonPop();
+          const blastColor = pathColorForStep(gate.stepNumber);
+          setBalloonBurstParticles(
+            Array.from({ length: 14 }, (_, i) => {
+              const angle = (i / 14) * Math.PI * 2;
+              const dist = 28 + (i % 3) * 14;
+              return {
+                id: i,
+                dx: Math.cos(angle) * dist,
+                dy: Math.sin(angle) * dist,
+                size: 5 + (i % 4),
+                color: i % 2 === 0 ? blastColor : "#FFFFFF",
+              };
+            })
+          );
         }
 
-        const baseline = pendingBaselineRef.current;
-        if (baseline) {
-          startActiveExercise(baseline, targetsRef.current, t0);
-        }
+        window.setTimeout(() => {
+          setPoppingTargetId(null);
+          setBalloonBurstParticles([]);
+
+          // Stamp shared T0 at blast end so board + camera clocks start together
+          const t0 = Date.now();
+          syncEpochRef.current = t0;
+          sessionStartTimeRef.current = t0;
+
+          try {
+            const visionAtT0 = getLatestVisionStateRef.current();
+            const canvas = cameraCanvasRef.current;
+            const video = cameraVideoRef.current;
+            let imageDataUrl: string | null = null;
+            let imageWidth = 0;
+            let imageHeight = 0;
+            // Prefer raw video frame — NEVER the overlay canvas (that bakes the
+            // live yellow/teal skeleton into the still; stance viewer draws its own).
+            if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+              try {
+                const tmp = document.createElement("canvas");
+                tmp.width = video.videoWidth;
+                tmp.height = video.videoHeight;
+                const ctx = tmp.getContext("2d");
+                ctx?.drawImage(video, 0, 0);
+                imageWidth = tmp.width;
+                imageHeight = tmp.height;
+                imageDataUrl = tmp.toDataURL("image/jpeg", 0.88);
+              } catch {
+                imageDataUrl = null;
+              }
+            }
+            if (!imageDataUrl && canvas && canvas.width > 0 && canvas.height > 0) {
+              // Last resort: strip overlay by re-drawing video onto a temp canvas
+              // if possible; otherwise skip (better empty than double skeleton).
+              imageWidth = canvas.width;
+              imageHeight = canvas.height;
+              try {
+                if (video && video.readyState >= 2) {
+                  const tmp = document.createElement("canvas");
+                  tmp.width = canvas.width;
+                  tmp.height = canvas.height;
+                  const ctx = tmp.getContext("2d");
+                  ctx?.drawImage(video, 0, 0, tmp.width, tmp.height);
+                  imageDataUrl = tmp.toDataURL("image/jpeg", 0.88);
+                }
+              } catch {
+                imageDataUrl = null;
+              }
+            }
+            const stance = buildCenterStanceSnapshot({
+              pose: visionAtT0.pose,
+              imageDataUrl,
+              imageWidth,
+              imageHeight,
+              isMirrored,
+              timestamp: t0,
+            });
+            centerStanceAnglesRef.current = stance.angles;
+            setCenterStanceSnapshot(stance);
+          } catch {
+            centerStanceAnglesRef.current = null;
+            setCenterStanceSnapshot(null);
+          }
+
+          const baseline = pendingBaselineRef.current;
+          if (baseline) {
+            startActiveExercise(baseline, targetsRef.current, t0);
+          }
+        }, 550);
       }
     }, 50);
 
@@ -1927,7 +2219,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
         ? sessionTargets
         : targetsRef.current.length > 0
           ? targetsRef.current
-          : getRandomizedFarDirectionalTargets(customDurations, baseline);
+          : getRandomizedFarDirectionalTargets(customDurations, baseline, targetConfigOverrides);
 
     const t0 = sharedT0Ms ?? syncEpochRef.current ?? Date.now();
     syncEpochRef.current = t0;
@@ -1990,6 +2282,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
 
   const handleRestart = () => {
     onResultFullScreenChange?.(false);
+    void persistSessionVideo(`partial_${Date.now()}`);
     setPhase("READY");
     setPauseReason(null);
     setCalibrationBaseline(null);
@@ -2012,7 +2305,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
     setShowGoodBadge(false);
     setCompletedCount(0);
     setElapsedMs(0);
-    setTargets(getDirectionalTargets(customDurations, undefined, null));
+    setTargets(getDirectionalTargets(customDurations, targetConfigOverrides, null));
     distanceSamplesRef.current = [];
     clearActiveTrail();
     isAdvancingRef.current = false;
@@ -2028,6 +2321,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
     setSensorsReady(false);
     setAngleSyncReport(null);
     setTransitAngleBoxPlots(null);
+    centerStanceAnglesRef.current = null;
     setCenterStanceSnapshot(null);
     setAngleReportSavePath(null);
     setAngleReportSaveError(null);
@@ -2061,6 +2355,26 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
       setPdfExportError(err?.message || String(err));
     } finally {
       setIsExportingPdf(false);
+    }
+  };
+
+  /** Landscape PDF: board PNG + paired line chart | box plot per Target (n−1)→n */
+  const handleSaveVisualReport = async () => {
+    if (!sessionSummary || !resultBoardRef.current) return;
+    setIsSavingVisualReport(true);
+    setPdfExportError(null);
+    try {
+      const res = await PdfReportService.generateAndSaveLandscapeVisualReport({
+        boardElement: resultBoardRef.current,
+        summary: sessionSummary,
+        holdSeries: sessionSummary.holdWindowErrorSeries ?? [],
+        transitBoxPlots: transitAngleBoxPlots ?? [],
+      });
+      setPdfExportResult({ filename: res.filename, filePath: res.filePath });
+    } catch (err: unknown) {
+      setPdfExportError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSavingVisualReport(false);
     }
   };
 
@@ -2177,8 +2491,8 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
           {/* Right: PDF Export & Restart Actions */}
           <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
             <button
-              onClick={handleExportPdf}
-              disabled={isExportingPdf || !sessionSummary}
+              onClick={handleSaveVisualReport}
+              disabled={isSavingVisualReport || isExportingPdf || !sessionSummary}
               className="btn-primary"
               style={{
                 display: "flex",
@@ -2189,6 +2503,26 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                 fontWeight: 800,
                 borderRadius: "10px",
                 background: "var(--teal-primary)",
+              }}
+            >
+              <Download size={16} />
+              <span>
+                {isSavingVisualReport ? "Saving landscape report…" : "Save Report"}
+              </span>
+            </button>
+
+            <button
+              onClick={handleExportPdf}
+              disabled={isExportingPdf || isSavingVisualReport || !sessionSummary}
+              className="btn-secondary"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "10px 20px",
+                fontSize: "0.875rem",
+                fontWeight: 800,
+                borderRadius: "10px",
               }}
             >
               <Download size={16} />
@@ -2597,7 +2931,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
         </div>
       )}
 
-      {/* Configurable Target Hold Durations Panel (Available in READY phase) */}
+      {/* Configurable Target Hold & Size Panel (Available in READY phase) */}
       {phase === "READY" && (
         <div
           className="medical-card"
@@ -2622,10 +2956,10 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
             <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
               <SlidersHorizontal size={18} color="var(--teal-primary)" />
               <span style={{ fontWeight: 800, fontSize: "0.875rem", color: "var(--text-main)" }}>
-                Configurable Target Hold Durations
+                Configurable Target Hold & Size
               </span>
               <span style={{ fontSize: "0.6875rem", color: "var(--text-muted)" }}>
-                (Protocol Defaults: Left: 2s, Right: 3s, Forward: 1s, Backward: 2s, Center: 3s)
+                (Defaults: Hold 2–3s · Circle radius {DEFAULT_DIRECTIONAL_TOLERANCES_MM["SHIFT FORWARD"]} mm)
               </span>
             </div>
             <div
@@ -2648,7 +2982,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
                   gap: "10px",
                 }}
               >
@@ -2660,10 +2994,14 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                     { name: "SHIFT BACKWARD" as DirectionalTargetName, label: "Backward" },
                     { name: "SHIFT FORWARD-LEFT" as DirectionalTargetName, label: "Fwd-Left" },
                     { name: "SHIFT BACKWARD-RIGHT" as DirectionalTargetName, label: "Back-Right" },
-                    { name: "RETURN TO CENTER" as DirectionalTargetName, label: "Center" },
+                    { name: "RETURN TO CENTER" as DirectionalTargetName, label: "Target 0" },
                   ] as const
                 ).map(({ name, label }) => {
                   const sec = customDurations[name] ?? DEFAULT_DIRECTIONAL_DURATIONS[name];
+                  const sizeMm =
+                    customTolerancesMm[name] ?? DEFAULT_DIRECTIONAL_TOLERANCES_MM[name];
+                  const sizeAtMin = sizeMm <= DIRECTIONAL_TOLERANCE_MM_BOUNDS.min;
+                  const sizeAtMax = sizeMm >= DIRECTIONAL_TOLERANCE_MM_BOUNDS.max;
                   return (
                     <div
                       key={name}
@@ -2675,56 +3013,113 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                         display: "flex",
                         flexDirection: "column",
                         alignItems: "center",
-                        gap: "6px",
+                        gap: "8px",
                       }}
                     >
                       <span style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-main)" }}>
                         {label} Target
                       </span>
-                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <button
-                          type="button"
-                          onClick={() => handleDurationChange(name, -1)}
-                          disabled={sec <= 1}
-                          style={{
-                            width: "24px",
-                            height: "24px",
-                            borderRadius: "4px",
-                            border: "1px solid #CBD5E1",
-                            background: sec <= 1 ? "#F1F5F9" : "#FFFFFF",
-                            cursor: sec <= 1 ? "not-allowed" : "pointer",
-                            fontWeight: 800,
-                            fontSize: "0.875rem",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          -
-                        </button>
-                        <span style={{ fontWeight: 800, fontSize: "0.9375rem", minWidth: "26px", textAlign: "center" }}>
-                          {sec}s
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => handleDurationChange(name, 1)}
-                          disabled={sec >= 15}
-                          style={{
-                            width: "24px",
-                            height: "24px",
-                            borderRadius: "4px",
-                            border: "1px solid #CBD5E1",
-                            background: sec >= 15 ? "#F1F5F9" : "#FFFFFF",
-                            cursor: sec >= 15 ? "not-allowed" : "pointer",
-                            fontWeight: 800,
-                            fontSize: "0.875rem",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          +
-                        </button>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "6px", width: "100%" }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
+                          <span style={{ fontSize: "0.625rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                            Hold
+                          </span>
+                          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                            <button
+                              type="button"
+                              onClick={() => handleDurationChange(name, -1)}
+                              disabled={sec <= 1}
+                              style={{
+                                width: "24px",
+                                height: "24px",
+                                borderRadius: "4px",
+                                border: "1px solid #CBD5E1",
+                                background: sec <= 1 ? "#F1F5F9" : "#FFFFFF",
+                                cursor: sec <= 1 ? "not-allowed" : "pointer",
+                                fontWeight: 800,
+                                fontSize: "0.875rem",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                              }}
+                            >
+                              -
+                            </button>
+                            <span style={{ fontWeight: 800, fontSize: "0.875rem", minWidth: "28px", textAlign: "center" }}>
+                              {sec}s
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleDurationChange(name, 1)}
+                              disabled={sec >= 15}
+                              style={{
+                                width: "24px",
+                                height: "24px",
+                                borderRadius: "4px",
+                                border: "1px solid #CBD5E1",
+                                background: sec >= 15 ? "#F1F5F9" : "#FFFFFF",
+                                cursor: sec >= 15 ? "not-allowed" : "pointer",
+                                fontWeight: 800,
+                                fontSize: "0.875rem",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                              }}
+                            >
+                              +
+                            </button>
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
+                          <span style={{ fontSize: "0.625rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                            Radius
+                          </span>
+                          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                            <button
+                              type="button"
+                              onClick={() => handleToleranceChange(name, -DIRECTIONAL_TOLERANCE_MM_BOUNDS.step)}
+                              disabled={sizeAtMin}
+                              style={{
+                                width: "24px",
+                                height: "24px",
+                                borderRadius: "4px",
+                                border: "1px solid #CBD5E1",
+                                background: sizeAtMin ? "#F1F5F9" : "#FFFFFF",
+                                cursor: sizeAtMin ? "not-allowed" : "pointer",
+                                fontWeight: 800,
+                                fontSize: "0.875rem",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                              }}
+                            >
+                              -
+                            </button>
+                            <span style={{ fontWeight: 800, fontSize: "0.875rem", minWidth: "52px", textAlign: "center" }}>
+                              {sizeMm} mm
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleToleranceChange(name, DIRECTIONAL_TOLERANCE_MM_BOUNDS.step)}
+                              disabled={sizeAtMax}
+                              style={{
+                                width: "24px",
+                                height: "24px",
+                                borderRadius: "4px",
+                                border: "1px solid #CBD5E1",
+                                background: sizeAtMax ? "#F1F5F9" : "#FFFFFF",
+                                cursor: sizeAtMax ? "not-allowed" : "pointer",
+                                fontWeight: 800,
+                                fontSize: "0.875rem",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                              }}
+                            >
+                              +
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   );
@@ -2750,10 +3145,21 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
          ===================================================================== */}
       {phase !== "COMPLETED" ? (
         <>
+          {/* Silent session capture region: instruction + board + camera */}
+          <div
+            ref={exerciseRecordRegionRef}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "18px",
+              width: "100%",
+            }}
+          >
           {/* 1. TOP LARGE CLEAR INSTRUCTION CARD */}
           {phase === "CALIBRATING" ? (
             <div
               className="medical-card"
+              data-record-snap="instructions"
               style={{
                 padding: "24px 28px",
                 textAlign: "center",
@@ -2982,9 +3388,11 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
           ) : (
             <div
               className="medical-card"
+              data-record-snap="instructions"
               style={{
                 padding: "10px 14px",
                 textAlign: "center",
+                position: "relative",
                 background: showGoodBadge
                   ? "linear-gradient(135deg, #ECFDF5 0%, #D1FAE5 100%)"
                   : isWithinTargetZone
@@ -2999,6 +3407,21 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                 transition: "all 0.25s ease",
               }}
             >
+              {/* Live instruction mirror for MP4 — guidance/timer every frame */}
+              <canvas
+                ref={recordInstructionsCanvasRef}
+                data-record-live="instructions"
+                aria-hidden
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  opacity: 0,
+                  pointerEvents: "none",
+                  zIndex: 0,
+                }}
+              />
               {/* Step Progress & Target Tag */}
               <div
                 style={{
@@ -3019,12 +3442,16 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                 {phase === "CENTER_HOLD" ? (
                   <span>
                     {sensorsReady
-                      ? "Sensors Ready · Center Stance"
+                      ? "Target 0 · Center Stance"
                       : "Waiting Board + Camera"}
                   </span>
                 ) : (
                   <>
-                    <span>Target {currentTargetIndex + 1} of {targets.length}</span>
+                    <span>
+                      Target {currentTarget?.stepNumber ?? currentTargetIndex + 1}
+                      {" · "}
+                      {currentTargetIndex + 1}/{targets.length}
+                    </span>
                     <span>&bull;</span>
                     <span>{currentTarget?.shortLabel}</span>
                   </>
@@ -3045,9 +3472,11 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
               >
                 {phase === "CENTER_HOLD"
                   ? sensorsReady
-                    ? "STAND IN CENTER"
+                    ? "TARGET 0 — STAND IN CENTER"
                     : "WAITING FOR SENSORS"
-                  : currentTarget?.name}
+                  : currentTarget?.stepNumber === 0
+                    ? "RETURN TO TARGET 0 (CENTER)"
+                    : currentTarget?.name}
               </h2>
 
               {/* Sequential Target Instruction */}
@@ -3262,6 +3691,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
 
               {/* Physical Balance Board Chassis */}
               <div
+                data-record-snap="board"
                 style={{
                   flex: "1 1 auto",
                   width: "100%",
@@ -3274,9 +3704,26 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                   boxShadow:
                     "0 10px 25px -5px rgba(15, 23, 42, 0.08), inset 0 2px 4px rgba(255, 255, 255, 0.8)",
                   padding: "14px",
-                  overflow: "hidden",
+                  // visible so balloons can grow to 4× without clipping at the chassis edge
+                  overflow: "visible",
                 }}
               >
+                {/* Live board mirror for MP4 — oversized bleed so outline + numbers aren't cut */}
+                <canvas
+                  ref={recordBoardCanvasRef}
+                  data-record-live="board"
+                  aria-hidden
+                  style={{
+                    position: "absolute",
+                    left: -RECORD_BOARD_BLEED_PX,
+                    top: -RECORD_BOARD_BLEED_PX,
+                    width: `calc(100% + ${RECORD_BOARD_BLEED_PX * 2}px)`,
+                    height: `calc(100% + ${RECORD_BOARD_BLEED_PX * 2}px)`,
+                    opacity: 0,
+                    pointerEvents: "none",
+                    zIndex: 0,
+                  }}
+                />
                 {/* Surface Perimeter */}
                 <div
                   style={{
@@ -3286,6 +3733,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                     borderRadius: "20px",
                     border: "1px solid #E2E8F0",
                     background: "#FAFCFC",
+                    overflow: "visible",
                   }}
                 >
                   {/* Center Crosshair Lines */}
@@ -3458,13 +3906,36 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                     </div>
                   )}
 
-                  {/* VISUAL TARGETS — only reveal current + completed (never show future targets) */}
+                  {/* Balloon targets — same tolerance footprint; inflate in-zone; blast on achieve */}
+                  <style>{`
+                    @keyframes dirBalloonBurst {
+                      from { transform: translate(0, 0) scale(1); opacity: 1; }
+                      to { transform: translate(var(--p-dx), var(--p-dy)) scale(0); opacity: 0; }
+                    }
+                    @keyframes dirBalloonPopBody {
+                      0% { transform: scale(2.7); opacity: 1; }
+                      45% { transform: scale(3.3); opacity: 0.85; }
+                      100% { transform: scale(0.2); opacity: 0; }
+                    }
+                    .dir-balloon-popping {
+                      animation: dirBalloonPopBody 0.45s ease-out forwards !important;
+                    }
+                    @keyframes dirRewardPop {
+                      0% { transform: translate(-50%, -40%) scale(0.35); opacity: 0; }
+                      18% { transform: translate(-50%, -85%) scale(1.18); opacity: 1; }
+                      35% { transform: translate(-50%, -105%) scale(1); opacity: 1; }
+                      100% { transform: translate(-50%, -175%) scale(0.92); opacity: 0; }
+                    }
+                    .dir-reward-popup {
+                      animation: dirRewardPop 1.7s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+                      pointer-events: none;
+                    }
+                  `}</style>
                   {targets.map((t, idx) => {
                     const coords = mapCopToBoard(t.x, t.y);
                     const isCenterGate = phase === "CENTER_HOLD" && t.name === "RETURN TO CENTER";
                     const isCurrent = phase === "CENTER_HOLD" ? isCenterGate : idx === currentTargetIndex;
                     const isCompleted = phase === "CENTER_HOLD" ? false : idx < currentTargetIndex;
-                    // Before start / ready: show nothing. Center hold: only center. Active: current + done.
                     const shouldReveal =
                       phase === "CENTER_HOLD"
                         ? isCenterGate
@@ -3473,7 +3944,19 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                           : false;
                     if (!shouldReveal) return null;
 
-                    const zoneDiamPct = Math.max(8, (t.tolerance || 0.16) * 100);
+                    // True circle: aspect-correct % so radius (mm) looks round on 446×238 board
+                    const tolMm =
+                      t.toleranceMm ??
+                      (t.tolerance || 0.16) * WII_BOARD_DIMENSIONS.halfDistanceXMm;
+                    const zoneSize = targetCircleSizePercent(tolMm);
+                    const progressPct = phase === "CENTER_HOLD" ? centerHoldProgress : holdProgress;
+                    const inflate =
+                      isCurrent && isWithinTargetZone
+                        ? Math.max(0, Math.min(1, progressPct / 100))
+                        : 0;
+                    const isPopping = poppingTargetId === t.id;
+                    const balloonColor = pathColorForStep(t.stepNumber);
+
                     return (
                       <div
                         key={t.id}
@@ -3481,108 +3964,82 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                           position: "absolute",
                           left: `${coords.xPercent}%`,
                           top: `${coords.yPercent}%`,
-                          width: `${zoneDiamPct}%`,
-                          height: `${zoneDiamPct}%`,
+                          width: `${zoneSize.widthPct}%`,
+                          height: `${zoneSize.heightPct}%`,
                           transform: "translate(-50%, -50%)",
                           pointerEvents: "none",
-                          zIndex: isCurrent ? 4 : 3,
+                          zIndex: isCurrent || isPopping ? 5 : 3,
                           display: "flex",
                           flexDirection: "column",
                           alignItems: "center",
                         }}
                       >
-                        {/* Target zone sized to real COP tolerance (same radius as hold detection) */}
+                        <DirectionalTargetBalloon
+                          id={t.id}
+                          label=""
+                          color={balloonColor}
+                          inflate={inflate}
+                          isCurrent={isCurrent}
+                          isInside={isCurrent && isWithinTargetZone}
+                          isCompleted={isCompleted && !isPopping}
+                          isPopping={isPopping}
+                          particles={isPopping ? balloonBurstParticles : []}
+                        />
+
+                        {/* Target number on head near zone border */}
                         <div
                           style={{
-                            width: "100%",
-                            height: "100%",
+                            position: "absolute",
+                            left: "50%",
+                            top: 0,
+                            transform: "translate(-50%, -110%)",
+                            width: 22,
+                            height: 22,
                             borderRadius: "50%",
-                            border: isCurrent
-                              ? isWithinTargetZone
-                                ? "3px solid #059669"
-                                : "2px dashed var(--teal-primary)"
-                              : isCompleted
-                                ? "2.5px solid #059669"
-                                : "1.5px dashed #CBD5E1",
-                            background: isCurrent
-                              ? isWithinTargetZone
-                                ? "rgba(5, 150, 105, 0.18)"
-                                : "rgba(13, 148, 136, 0.08)"
-                              : isCompleted
-                                ? "rgba(16, 185, 129, 0.18)"
-                                : "rgba(241, 245, 249, 0.4)",
+                            background: balloonColor,
+                            color: "#FFFFFF",
+                            border: "2px solid #FFFFFF",
+                            boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "center",
-                            transition: "all 0.2s ease",
-                            boxSizing: "border-box",
+                            fontSize: "0.6875rem",
+                            fontWeight: 900,
+                            zIndex: 6,
                           }}
                         >
-                          {isCompleted ? (
-                            <div
-                              style={{
-                                width: "20px",
-                                height: "20px",
-                                borderRadius: "50%",
-                                background: "#059669",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                color: "#FFFFFF",
-                                fontSize: "0.6875rem",
-                                fontWeight: 900,
-                              }}
-                            >
-                              ✓
-                            </div>
-                          ) : isCurrent ? (
-                            <div
-                              style={{
-                                width: "18px",
-                                height: "18px",
-                                borderRadius: "50%",
-                                background: isWithinTargetZone ? "#059669" : "var(--teal-primary)",
-                                boxShadow: isWithinTargetZone
-                                  ? "0 0 12px rgba(5, 150, 105, 0.6)"
-                                  : "0 0 8px rgba(13, 148, 136, 0.4)",
-                              }}
-                            />
-                          ) : (
-                            <span style={{ fontSize: "0.625rem", fontWeight: 700, color: "#94A3B8" }}>
-                              {t.stepNumber}
-                            </span>
-                          )}
+                          {t.stepNumber}
                         </div>
 
-                        {/* Label Badge */}
                         <div
                           style={{
                             position: "absolute",
                             top: "100%",
                             left: "50%",
                             transform: "translateX(-50%)",
-                            marginTop: "2px",
+                            marginTop: "14px",
                             whiteSpace: "nowrap",
                             fontSize: "0.625rem",
                             fontWeight: 800,
                             color: isCurrent
                               ? isWithinTargetZone
                                 ? "#059669"
-                                : "var(--teal-primary)"
+                                : balloonColor
                               : isCompleted
                                 ? "#059669"
                                 : "var(--text-muted)",
                             background: "rgba(255, 255, 255, 0.92)",
                             padding: "1px 6px",
                             borderRadius: "4px",
-                            border: `1px solid ${isCurrent
+                            border: `1px solid ${
+                              isCurrent
                                 ? isWithinTargetZone
                                   ? "#A7F3D0"
-                                  : "var(--border-mint)"
+                                  : `${balloonColor}55`
                                 : isCompleted
                                   ? "#A7F3D0"
                                   : "#E2E8F0"
-                              }`,
+                            }`,
                           }}
                         >
                           {isCompleted
@@ -3594,6 +4051,89 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                       </div>
                     );
                   })}
+
+                  {/* Live path + miss reward float at achieved target */}
+                  {liveRewardPopup ? (
+                    <div
+                      key={liveRewardPopup.id}
+                      className="dir-reward-popup"
+                      style={{
+                        position: "absolute",
+                        left: `${liveRewardPopup.xPercent}%`,
+                        top: `${liveRewardPopup.yPercent}%`,
+                        zIndex: 20,
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        gap: 6,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: 8,
+                          alignItems: "center",
+                        }}
+                      >
+                        <div
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: 10,
+                            background: liveRewardPopup.color,
+                            color: "#FFFFFF",
+                            fontWeight: 900,
+                            fontSize: "0.9375rem",
+                            lineHeight: 1.1,
+                            boxShadow: "0 4px 14px rgba(15,23,42,0.22)",
+                            border: "2px solid #FFFFFF",
+                            textAlign: "center",
+                            minWidth: 52,
+                          }}
+                        >
+                          <div>+{liveRewardPopup.pathScore}</div>
+                          <div
+                            style={{
+                              fontSize: "0.5625rem",
+                              fontWeight: 800,
+                              letterSpacing: "0.04em",
+                              opacity: 0.92,
+                              marginTop: 2,
+                            }}
+                          >
+                            PATH
+                          </div>
+                        </div>
+                        <div
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: 10,
+                            background: "#0F766E",
+                            color: "#FFFFFF",
+                            fontWeight: 900,
+                            fontSize: "0.9375rem",
+                            lineHeight: 1.1,
+                            boxShadow: "0 4px 14px rgba(15,23,42,0.22)",
+                            border: "2px solid #FFFFFF",
+                            textAlign: "center",
+                            minWidth: 52,
+                          }}
+                        >
+                          <div>+{liveRewardPopup.missScore}</div>
+                          <div
+                            style={{
+                              fontSize: "0.5625rem",
+                              fontWeight: 800,
+                              letterSpacing: "0.04em",
+                              opacity: 0.92,
+                              marginTop: 2,
+                            }}
+                          >
+                            MISS
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
 
                   {/* REAL-TIME MOVING COP BALL */}
                   {(isRealConnected || isSimulationMode) && liveCopX !== null && liveCopY !== null ? (
@@ -3711,6 +4251,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
           {/* Live camera + MediaPipe skeleton (starts with exercise) */}
           <div
             className="medical-card"
+            data-record-snap="camera"
             style={{
               padding: "12px",
               display: "flex",
@@ -3824,7 +4365,8 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                   transform: isMirrored ? "scaleX(-1)" : "none",
                   pointerEvents: "none",
                   display: isCameraActive ? "block" : "none",
-                  background: "#020617",
+                  // Transparent so a clearRect never flashes over the <video> underneath
+                  background: "transparent",
                 }}
               />
               {!isCameraActive && (
@@ -3865,6 +4407,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                   ? " · Stand in frame for skeleton"
                   : ""}
             </div>
+          </div>
           </div>
           </div>
 
@@ -4604,41 +5147,14 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
             )}
           </div>
 
-          {/* Board-synced 2D joint angle report (T1 → T2 …) */}
-          {(angleSyncReport || centerStanceSnapshot || (transitAngleBoxPlots && transitAngleBoxPlots.length > 0)) && (
-            <Pose2DAngleSyncReport
-              report={angleSyncReport}
-              centerStance={centerStanceSnapshot}
-              transitBoxPlots={transitAngleBoxPlots}
-              isSaving={isSavingAngleReport}
-              savedJsonPath={angleReportSavePath}
-              saveError={angleReportSaveError}
-              onSaveAgain={async () => {
-                if (!angleSyncReport || !sessionSummary) return;
-                setIsSavingAngleReport(true);
-                setAngleReportSaveError(null);
-                try {
-                  const saved = await Pose2DAngleReportService.saveLocally(angleSyncReport, {
-                    sessionId: sessionSummary.sessionId,
-                    patientId: sessionSummary.patientId,
-                    patientName: sessionSummary.patientName,
-                    sessionDate: sessionSummary.sessionDate,
-                    isRealHardware: sessionSummary.isRealHardware,
-                  });
-                  setAngleReportSavePath(saved.jsonPath);
-                } catch (err: unknown) {
-                  setAngleReportSaveError(err instanceof Error ? err.message : String(err));
-                } finally {
-                  setIsSavingAngleReport(false);
-                }
-              }}
-            />
-          )}
+          {/* Results flow (flex order): 1 board → 2 line graphs → 3 box plots → 4+ rest */}
 
           {/* 2. MAIN RESULT HERO: LARGE WII BALANCE BOARD VISUALIZATION */}
           <div
+            ref={resultBoardRef}
             className="medical-card"
             style={{
+              order: 1,
               padding: "24px 20px",
               display: "flex",
               flexDirection: "column",
@@ -4787,44 +5303,44 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                     {perTargetPaths.map((tp) => {
                       if (!visiblePathSteps.has(tp.stepNumber)) return null;
 
-                      // Tolerance ellipse in viewBox % space (matches mapCopToBoard: 1.0 norm = 50%)
-                      const tolRx = (tp.tolerance ?? 0.16) * 50;
-                      const tolRy = (tp.tolerance ?? 0.16) * 50;
+                      // Circular mm zone → aspect-corrected rx/ry under preserveAspectRatio="none"
+                      const { rx: tolRx, ry: tolRy } = targetCircleRadiiPercent(
+                        tp.toleranceMm ??
+                          (tp.tolerance ?? 0.16) * WII_BOARD_DIMENSIONS.halfDistanceXMm
+                      );
                       const tx = tp.targetBoardPos.xPercent;
                       const ty = tp.targetBoardPos.yPercent;
 
-                      const startPt = tp.points[0];
-                      const endPt = tp.points[tp.points.length - 1];
-                      const hitPt = tp.achievementPoint;
-
                       return (
                         <g key={tp.name}>
-                          {/* Real hit-zone outline (same radius used for completion) */}
+                          {/* True circular hit-zone (looks round on the stretched board SVG) */}
                           <ellipse
                             cx={tx}
                             cy={ty}
                             rx={tolRx}
                             ry={tolRy}
-                            fill={`${tp.color}14`}
+                            fill={`${tp.color}18`}
                             stroke={tp.color}
-                            strokeWidth="1.25"
-                            strokeDasharray="3 2.5"
+                            strokeWidth="1.8"
+                            strokeDasharray="4 3.5"
+                            strokeLinecap="butt"
                             vectorEffect="non-scaling-stroke"
-                            strokeOpacity="0.85"
+                            strokeOpacity="0.92"
                           />
 
-                          {/* Solid = travel / outside · Dotted pieces = movement inside target zone */}
+                          {/* Solid = travel outside · continuous dashed = path while inside target */}
                           {tp.pathSegments.map((seg, segIdx) => {
+                            const pts = seg.points
+                              .map((p) => `${p.xPercent.toFixed(2)},${p.yPercent.toFixed(2)}`)
+                              .join(" ");
                             if (!seg.isInside) {
                               return (
                                 <polyline
                                   key={`${tp.name}-seg-${segIdx}`}
-                                  points={seg.points
-                                    .map((p) => `${p.xPercent.toFixed(2)},${p.yPercent.toFixed(2)}`)
-                                    .join(" ")}
+                                  points={pts}
                                   fill="none"
                                   stroke={tp.color}
-                                  strokeWidth="2.2"
+                                  strokeWidth="1.55"
                                   vectorEffect="non-scaling-stroke"
                                   strokeLinecap="round"
                                   strokeLinejoin="round"
@@ -4832,122 +5348,116 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                                 />
                               );
                             }
-                            // Inside target: draw real gaps (dasharray fails on stretched board SVG)
+                            // Continuous dotted trail — even dashes in screen px (non-scaling-stroke)
                             return (
-                              <g key={`${tp.name}-seg-${segIdx}-dots`}>
-                                {toDottedPieces(seg.points).map((piece, pIdx) => (
-                                  <polyline
-                                    key={`${tp.name}-seg-${segIdx}-d${pIdx}`}
-                                    points={piece
-                                      .map((p) => `${p.xPercent.toFixed(2)},${p.yPercent.toFixed(2)}`)
-                                      .join(" ")}
-                                    fill="none"
-                                    stroke={tp.color}
-                                    strokeWidth="2.6"
-                                    vectorEffect="non-scaling-stroke"
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                    strokeOpacity="0.95"
-                                  />
-                                ))}
-                              </g>
+                              <polyline
+                                key={`${tp.name}-seg-${segIdx}-dots`}
+                                points={pts}
+                                fill="none"
+                                stroke={tp.color}
+                                strokeWidth="2.2"
+                                strokeDasharray="4 3.5"
+                                vectorEffect="non-scaling-stroke"
+                                strokeLinecap="butt"
+                                strokeLinejoin="round"
+                                strokeOpacity="0.95"
+                              />
                             );
                           })}
 
-                          {/* Small direction arrows along the path */}
+                          {/* Unfilled chevrons (>) along the path */}
                           {tp.arrows.map((a, aIdx) => (
                             <g
                               key={`${tp.name}-arrow-${aIdx}`}
                               transform={`translate(${a.x.toFixed(2)}, ${a.y.toFixed(2)}) rotate(${a.angleDeg.toFixed(1)})`}
                             >
-                              <polygon
-                                points="1.35,0 -1.1,-0.85 -0.55,0 -1.1,0.85"
-                                fill={tp.color}
-                                stroke="#FFFFFF"
-                                strokeWidth="0.15"
+                              <polyline
+                                points="-0.85,-0.85 0.55,0 -0.85,0.85"
+                                fill="none"
+                                stroke={tp.color}
+                                strokeWidth="0.7"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                vectorEffect="non-scaling-stroke"
                                 opacity="0.95"
                               />
                             </g>
                           ))}
 
-                          {tp.hasData && startPt && endPt && (
-                            <>
-                              <circle
-                                cx={startPt.xPercent}
-                                cy={startPt.yPercent}
-                                r="0.5"
-                                fill="#FFFFFF"
-                                stroke={tp.color}
-                                strokeWidth="1.5"
-                                vectorEffect="non-scaling-stroke"
-                              />
-                              <circle
-                                cx={endPt.xPercent}
-                                cy={endPt.yPercent}
-                                r="0.65"
-                                fill={tp.color}
-                                stroke="#FFFFFF"
-                                strokeWidth="1.5"
-                                vectorEffect="non-scaling-stroke"
-                              />
-                            </>
-                          )}
-
-                          {/* Closest COP sample — the achieved hit point inside / at the target */}
-                          {hitPt && (tp.isTargetReached || tp.isCompleted) && (
-                            <g>
-                              <circle
-                                cx={hitPt.xPercent}
-                                cy={hitPt.yPercent}
-                                r="1.35"
-                                fill={tp.color}
-                                stroke="#FFFFFF"
-                                strokeWidth="2"
-                                vectorEffect="non-scaling-stroke"
-                              />
-                              <circle
-                                cx={hitPt.xPercent}
-                                cy={hitPt.yPercent}
-                                r="0.45"
-                                fill="#FFFFFF"
-                              />
-                            </g>
-                          )}
+                          {/* Start/End (S/E) are HTML overlays below — filled with path color */}
                         </g>
                       );
                     })}
                   </svg>
 
-                  {/* Transit time labels (HTML so text is not stretched by SVG none-aspect) */}
+                  {/* Start / End markers + transit times (HTML so text is not stretched) */}
                   {perTargetPaths.map((tp) => {
-                    if (!visiblePathSteps.has(tp.stepNumber)) return null;
-                    if (tp.transitSeconds === null || !tp.transitLabelPos) return null;
-                    return (
+                    if (!visiblePathSteps.has(tp.stepNumber) || !tp.hasData || tp.points.length < 1) {
+                      return null;
+                    }
+                    const sPt = tp.points[0];
+                    const ePt = tp.points[tp.points.length - 1];
+                    const marker = (label: "S" | "E", pt: { xPercent: number; yPercent: number }) => (
                       <div
-                        key={`${tp.name}-transit`}
+                        key={`${tp.name}-${label}`}
                         style={{
                           position: "absolute",
-                          left: `${tp.transitLabelPos.xPercent}%`,
-                          top: `${tp.transitLabelPos.yPercent}%`,
-                          transform: "translate(-50%, -120%)",
-                          zIndex: 5,
+                          left: `${pt.xPercent}%`,
+                          top: `${pt.yPercent}%`,
+                          transform: "translate(-50%, -50%)",
+                          zIndex: 6,
                           pointerEvents: "none",
-                          padding: "2px 7px",
-                          borderRadius: 6,
-                          background: "#FFFFFF",
-                          border: `1.5px solid ${tp.color}`,
-                          boxShadow: "0 1px 4px rgba(15, 23, 42, 0.12)",
-                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                          fontSize: "0.6875rem",
-                          fontWeight: 800,
-                          color: tp.color,
-                          whiteSpace: "nowrap",
-                          lineHeight: 1.2,
+                          width: 18,
+                          height: 18,
+                          borderRadius: "50%",
+                          background: tp.color,
+                          color: "#FFFFFF",
+                          border: "2px solid #FFFFFF",
+                          boxShadow: `0 0 0 1.5px ${tp.color}`,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: "0.625rem",
+                          fontWeight: 900,
+                          fontFamily: "ui-sans-serif, system-ui, sans-serif",
+                          lineHeight: 1,
                         }}
-                        title={`Travel time from leave previous (after complete) → hit target ${tp.stepNumber} boundary`}
+                        title={label === "S" ? `Start · Target ${tp.stepNumber}` : `End · Target ${tp.stepNumber}`}
                       >
-                        {tp.transitSeconds.toFixed(2)} s
+                        {label}
                       </div>
+                    );
+                    return (
+                      <React.Fragment key={`${tp.name}-se`}>
+                        {marker("S", sPt)}
+                        {marker("E", ePt)}
+                        {tp.transitSeconds !== null && tp.transitLabelPos ? (
+                          <div
+                            style={{
+                              position: "absolute",
+                              left: `${tp.transitLabelPos.xPercent}%`,
+                              top: `${tp.transitLabelPos.yPercent}%`,
+                              transform: "translate(-50%, -120%)",
+                              zIndex: 5,
+                              pointerEvents: "none",
+                              padding: "2px 7px",
+                              borderRadius: 6,
+                              background: "#FFFFFF",
+                              border: `1.5px solid ${tp.color}`,
+                              boxShadow: "0 1px 4px rgba(15, 23, 42, 0.12)",
+                              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                              fontSize: "0.6875rem",
+                              fontWeight: 800,
+                              color: tp.color,
+                              whiteSpace: "nowrap",
+                              lineHeight: 1.2,
+                            }}
+                            title={`Travel time from leave previous (after complete) → hit target ${tp.stepNumber} boundary`}
+                          >
+                            {tp.transitSeconds.toFixed(2)} s
+                          </div>
+                        ) : null}
+                      </React.Fragment>
                     );
                   })}
 
@@ -4990,39 +5500,76 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                         t.coordinateMetrics.validSampleCount > 0 &&
                         t.coordinateMetrics.samplesInTargetZoneCount > 0)
                     );
+                    const zone = targetCircleRadiiPercent(
+                      t.toleranceMm ??
+                        (t.tolerance || 0.16) * WII_BOARD_DIMENSIONS.halfDistanceXMm
+                    );
+                    // Number at head of circle (top, just outside dashed border)
+                    const labelLeft = coords.xPercent;
+                    const labelTop = coords.yPercent - zone.ry;
                     return (
-                      <div
-                        key={t.targetId}
-                        style={{
-                          position: "absolute",
-                          left: `${coords.xPercent}%`,
-                          top: `${coords.yPercent}%`,
-                          transform: "translate(-50%, -50%)",
-                          pointerEvents: "none",
-                          zIndex: 3,
-                        }}
-                      >
-                        {/* Number only — no direction text labels */}
+                      <React.Fragment key={t.targetId}>
+                        {/* Center + aim mark */}
                         <div
                           style={{
-                            width: "28px",
-                            height: "28px",
+                            position: "absolute",
+                            left: `${coords.xPercent}%`,
+                            top: `${coords.yPercent}%`,
+                            transform: "translate(-50%, -50%)",
+                            pointerEvents: "none",
+                            zIndex: 4,
+                            width: 20,
+                            height: 20,
                             borderRadius: "50%",
-                            background: dirColor,
+                            background: "rgba(255,255,255,0.92)",
+                            border: `1.5px solid ${dirColor}`,
+                            boxShadow: "0 1px 2px rgba(0,0,0,0.12)",
+                            color: dirColor,
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "center",
-                            color: "#FFFFFF",
-                            fontSize: "0.75rem",
-                            fontWeight: 800,
-                            boxShadow: isReached
-                              ? `0 0 0 3px ${dirColor}55, 0 1px 3px rgba(0,0,0,0.18)`
-                              : "0 1px 3px rgba(0,0,0,0.18)",
+                            fontSize: "0.875rem",
+                            fontWeight: 900,
+                            lineHeight: 1,
+                          }}
+                          aria-hidden
+                        >
+                          +
+                        </div>
+                        {/* Target number on head near border */}
+                        <div
+                          style={{
+                            position: "absolute",
+                            left: `${labelLeft}%`,
+                            top: `${labelTop}%`,
+                            transform: "translate(-50%, -110%)",
+                            pointerEvents: "none",
+                            zIndex: 5,
                           }}
                         >
-                          {t.stepNumber}
+                          <div
+                            style={{
+                              width: "26px",
+                              height: "26px",
+                              borderRadius: "50%",
+                              background: dirColor,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              color: "#FFFFFF",
+                              fontSize: "0.75rem",
+                              fontWeight: 800,
+                              border: "2px solid #FFFFFF",
+                              boxShadow: isReached
+                                ? `0 0 0 2px ${dirColor}66, 0 1px 3px rgba(0,0,0,0.18)`
+                                : "0 1px 3px rgba(0,0,0,0.18)",
+                            }}
+                            title={`Target ${t.stepNumber}`}
+                          >
+                            {t.stepNumber}
+                          </div>
                         </div>
-                      </div>
+                      </React.Fragment>
                     );
                   })}
                 </div>
@@ -5077,7 +5624,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                   <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
                     {perTargetPaths.map((tp) => {
                       const checked = visiblePathSteps.has(tp.stepNumber);
-                      const from = tp.stepNumber - 1;
+                      const from = tp.fromStep;
                       const to = tp.stepNumber;
                       return (
                         <label
@@ -5138,7 +5685,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                                 textOverflow: "ellipsis",
                               }}
                             >
-                              {tp.shortLabel}
+                              Target {to}
                               {tp.transitSeconds !== null ? ` · ${tp.transitSeconds.toFixed(2)}s` : ""}
                             </span>
                           </span>
@@ -5236,16 +5783,14 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
               {(perTargetPaths.length > 0
                 ? perTargetPaths.map((tp) => ({
                     step: tp.stepNumber,
-                    label: `Target ${tp.stepNumber}: ${tp.shortLabel}`,
                     color: tp.color,
                   }))
-                : PATH_STEP_COLORS.map((color, i) => ({
-                    step: i + 1,
-                    label: `Target ${i + 1}`,
-                    color,
+                : [1, 2, 3, 4, 5, 6, 0].map((step) => ({
+                    step,
+                    color: pathColorForStep(step),
                   }))
-              ).map(({ step, label, color }) => (
-                <div key={label} style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              ).map(({ step, color }) => (
+                <div key={`legend-t-${step}`} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                   <span
                     style={{
                       width: "18px",
@@ -5262,8 +5807,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                   >
                     {step}
                   </span>
-                  <span style={{ width: "20px", height: "2.5px", background: color, opacity: 0.72, display: "inline-block", borderRadius: "2px" }} />
-                  <span style={{ fontWeight: 700, color: "var(--text-main)" }}>{label}</span>
+                  <span style={{ fontWeight: 700, color: "var(--text-main)" }}>Target {step}</span>
                 </div>
               ))}
               <div style={{ display: "flex", alignItems: "center", gap: "6px", marginLeft: "4px" }}>
@@ -5282,7 +5826,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                 <span style={{ fontWeight: 600 }}>Inside target</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                <span style={{ fontSize: "0.7rem", fontWeight: 900, color: "#334155" }}>▶</span>
+                <span style={{ fontSize: "0.75rem", fontWeight: 700, color: "#334155", letterSpacing: "-0.05em" }}>{">"}</span>
                 <span style={{ fontWeight: 600 }}>Path direction</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
@@ -5302,12 +5846,46 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                 <span style={{ fontWeight: 600 }}>Leave→hit transit</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                <span style={{ width: "10px", height: "10px", borderRadius: "50%", border: "1.5px solid #0F766E", background: "#FFFFFF", display: "inline-block" }} />
-                <span style={{ fontWeight: 600 }}>Start Point</span>
+                <span
+                  style={{
+                    width: "16px",
+                    height: "16px",
+                    borderRadius: "50%",
+                    background: "#0F766E",
+                    color: "#FFFFFF",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: "0.5625rem",
+                    fontWeight: 900,
+                    border: "1.5px solid #FFFFFF",
+                    boxShadow: "0 0 0 1px #0F766E",
+                  }}
+                >
+                  S
+                </span>
+                <span style={{ fontWeight: 600 }}>Start</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                <span style={{ width: "10px", height: "10px", borderRadius: "50%", background: "#475569", display: "inline-block" }} />
-                <span style={{ fontWeight: 600 }}>Final Position</span>
+                <span
+                  style={{
+                    width: "16px",
+                    height: "16px",
+                    borderRadius: "50%",
+                    background: "#0F766E",
+                    color: "#FFFFFF",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: "0.5625rem",
+                    fontWeight: 900,
+                    border: "1.5px solid #FFFFFF",
+                    boxShadow: "0 0 0 1px #0F766E",
+                  }}
+                >
+                  E
+                </span>
+                <span style={{ fontWeight: 600 }}>End</span>
               </div>
             </div>
           </div>
@@ -5315,6 +5893,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
           {/* 3. PRIMARY OBJECTIVE COORDINATE METRICS */}
           <div
             style={{
+              order: 5,
               display: "grid",
               gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
               gap: "14px",
@@ -5454,6 +6033,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
           <div
             className="medical-card"
             style={{
+              order: 5,
               padding: "20px 24px",
               display: "flex",
               flexDirection: "column",
@@ -5717,6 +6297,7 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
             <div
               className="medical-card"
               style={{
+                order: 2,
                 padding: "20px 24px",
                 display: "flex",
                 flexDirection: "column",
@@ -5952,10 +6533,60 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
             </div>
           )}
 
+          {/* Transit angle box plots (leave→hit) — after line graphs */}
+          {(transitAngleBoxPlots && transitAngleBoxPlots.length > 0) && (
+            <div
+              className="medical-card"
+              style={{
+                order: 3,
+                padding: "20px 24px",
+                background: "#FFFFFF",
+                border: "1px solid #E2E8F0",
+              }}
+            >
+              <TransitAngleBoxPlotPanel plots={transitAngleBoxPlots} />
+            </div>
+          )}
+
+          {/* Board-synced 2D joint angle report (stance + gauges; box plots rendered above) */}
+          {(angleSyncReport || centerStanceSnapshot) && (
+            <div style={{ order: 4 }}>
+              <Pose2DAngleSyncReport
+                report={angleSyncReport}
+                centerStance={centerStanceSnapshot}
+                transitBoxPlots={transitAngleBoxPlots}
+                showTransitBoxPlots={false}
+                isSaving={isSavingAngleReport}
+                savedJsonPath={angleReportSavePath}
+                saveError={angleReportSaveError}
+                onSaveAgain={async () => {
+                  if (!angleSyncReport || !sessionSummary) return;
+                  setIsSavingAngleReport(true);
+                  setAngleReportSaveError(null);
+                  try {
+                    const saved = await Pose2DAngleReportService.saveLocally(angleSyncReport, {
+                      sessionId: sessionSummary.sessionId,
+                      patientId: sessionSummary.patientId,
+                      patientName: sessionSummary.patientName,
+                      sessionDate: sessionSummary.sessionDate,
+                      isRealHardware: sessionSummary.isRealHardware,
+                    });
+                    setAngleReportSavePath(saved.jsonPath);
+                  } catch (err: unknown) {
+                    setAngleReportSaveError(err instanceof Error ? err.message : String(err));
+                  } finally {
+                    setIsSavingAngleReport(false);
+                  }
+                }}
+              />
+            </div>
+          )}
+
           {/* 5. SECONDARY DESCRIPTIVE PROTOCOL METRICS & SENSOR INTEGRITY */}
           <div
             className="medical-card"
             style={{
+              order: 5,
               padding: "20px 24px",
               display: "flex",
               flexDirection: "column",
@@ -6181,10 +6812,215 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
             </div>
           </div>
 
-          {/* 6. Primary Action Buttons */}
+          {/* 6. Target rewards (1–10) — UI only, not in PDF */}
+          {rewardSummary && rewardSummary.targets.length > 0 && (
+            <div
+              className="medical-card"
+              style={{
+                order: 6,
+                padding: "22px 24px",
+                background: "linear-gradient(180deg, #FFFFFF 0%, #F0FDFA 100%)",
+                border: "1px solid #99F6E4",
+                display: "flex",
+                flexDirection: "column",
+                gap: "16px",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                  flexWrap: "wrap",
+                }}
+              >
+                <div>
+                  <div
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontSize: "0.6875rem",
+                      fontWeight: 800,
+                      letterSpacing: "0.06em",
+                      textTransform: "uppercase",
+                      color: "#0F766E",
+                    }}
+                  >
+                    <Award size={14} />
+                    Target rewards
+                    <MetricInfoButton {...REWARD_SCORE_INFO} />
+                  </div>
+                  <h3
+                    style={{
+                      margin: "6px 0 0",
+                      fontSize: "1.25rem",
+                      fontWeight: 900,
+                      color: "#0F172A",
+                    }}
+                  >
+                    Final mark{" "}
+                    <span style={{ color: "#0D9488" }}>
+                      {rewardSummary.finalScore}
+                    </span>
+                    <span style={{ color: "#94A3B8", fontWeight: 700 }}>
+                      {" "}
+                      / {rewardSummary.maxScore}
+                    </span>
+                  </h3>
+                  <p
+                    style={{
+                      margin: "4px 0 0",
+                      fontSize: "0.75rem",
+                      color: "#64748B",
+                      lineHeight: 1.45,
+                      maxWidth: 520,
+                    }}
+                  >
+                    Path score (shortest route) + miss score (hold graph closeness), averaged
+                    across every target. Not included in the PDF report.
+                  </p>
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "10px",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div
+                    style={{
+                      minWidth: 110,
+                      padding: "10px 14px",
+                      borderRadius: 10,
+                      background: "#FFFFFF",
+                      border: "1px solid #E2E8F0",
+                      textAlign: "center",
+                    }}
+                  >
+                    <div style={{ fontSize: "0.625rem", fontWeight: 800, color: "#64748B", textTransform: "uppercase" }}>
+                      Avg path
+                    </div>
+                    <div style={{ fontSize: "1.375rem", fontWeight: 900, color: "#0F172A" }}>
+                      {rewardSummary.averagePathScore}
+                      <span style={{ fontSize: "0.75rem", color: "#94A3B8" }}>/10</span>
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      minWidth: 110,
+                      padding: "10px 14px",
+                      borderRadius: 10,
+                      background: "#FFFFFF",
+                      border: "1px solid #E2E8F0",
+                      textAlign: "center",
+                    }}
+                  >
+                    <div style={{ fontSize: "0.625rem", fontWeight: 800, color: "#64748B", textTransform: "uppercase" }}>
+                      Avg miss
+                    </div>
+                    <div style={{ fontSize: "1.375rem", fontWeight: 900, color: "#0F172A" }}>
+                      {rewardSummary.averageMissScore}
+                      <span style={{ fontSize: "0.75rem", color: "#94A3B8" }}>/10</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ overflowX: "auto" }}>
+                <table
+                  style={{
+                    width: "100%",
+                    borderCollapse: "collapse",
+                    fontSize: "0.8125rem",
+                  }}
+                >
+                  <thead>
+                    <tr style={{ background: "#ECFDF5", color: "#134E4A" }}>
+                      <th style={{ textAlign: "left", padding: "8px 10px" }}>Target</th>
+                      <th style={{ textAlign: "right", padding: "8px 10px" }}>
+                        Path
+                        <MetricInfoButton
+                          what="Path score (1–10)"
+                          meaning="How straight your weight (COP) traveled to this target. Higher = less wandering, closer to the shortest route."
+                          how="We compare your actual path length to the straight-line distance from the previous target (or center) to this one. Exact shortest path = 10. If your route is about 3× longer, score = 1. In between, score falls evenly. Example: ideal 100 mm, you walked 200 mm → mid-range score."
+                        />
+                      </th>
+                      <th style={{ textAlign: "right", padding: "8px 10px" }}>
+                        Miss
+                        <MetricInfoButton
+                          what="Miss score (1–10)"
+                          meaning="During the hold, how close your weight (COP) stayed to the target center. Higher = steadier on the bullseye."
+                          how="We take your average distance from the center (mean miss). Right on center (0 mm) = 10. The target tolerance is the allowed circle size (e.g. 40 mm). If your average miss reaches about 2.5× that circle (e.g. 100 mm), score = 1. In between, score falls evenly. Normalizing by the circle size keeps the mark fair when targets are bigger or smaller."
+                        />
+                      </th>
+                      <th style={{ textAlign: "right", padding: "8px 10px" }}>Mark</th>
+                      <th style={{ textAlign: "right", padding: "8px 10px", color: "#64748B", fontWeight: 600 }}>
+                        Path mm (ideal → actual)
+                      </th>
+                      <th style={{ textAlign: "right", padding: "8px 10px", color: "#64748B", fontWeight: 600 }}>
+                        Mean miss mm
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rewardSummary.targets.map((row, idx) => (
+                      <tr
+                        key={`${row.stepNumber}-${row.shortLabel}`}
+                        style={{
+                          borderBottom: "1px solid #E2E8F0",
+                          background: idx % 2 === 0 ? "#FFFFFF" : "#F8FAFC",
+                        }}
+                      >
+                        <td style={{ padding: "9px 10px", fontWeight: 800 }}>
+                          T{row.stepNumber}{" "}
+                          <span style={{ color: "#64748B", fontWeight: 600 }}>{row.shortLabel}</span>
+                        </td>
+                        <td style={{ padding: "9px 10px", textAlign: "right", fontWeight: 800, color: "#0D9488" }}>
+                          {row.pathScore}
+                        </td>
+                        <td style={{ padding: "9px 10px", textAlign: "right", fontWeight: 800, color: "#0284C7" }}>
+                          {row.missScore}
+                        </td>
+                        <td style={{ padding: "9px 10px", textAlign: "right", fontWeight: 900, color: "#0F172A" }}>
+                          {row.targetScore}
+                        </td>
+                        <td
+                          style={{
+                            padding: "9px 10px",
+                            textAlign: "right",
+                            fontFamily: "ui-monospace, monospace",
+                            fontSize: "0.75rem",
+                            color: "#64748B",
+                          }}
+                        >
+                          {row.shortestPathMm.toFixed(0)} → {row.actualPathMm.toFixed(0)}
+                        </td>
+                        <td
+                          style={{
+                            padding: "9px 10px",
+                            textAlign: "right",
+                            fontFamily: "ui-monospace, monospace",
+                            fontSize: "0.75rem",
+                            color: "#64748B",
+                          }}
+                        >
+                          {row.meanMissMm === null ? "—" : row.meanMissMm.toFixed(1)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* 7. Primary Action Buttons */}
           <div
             className="medical-card"
             style={{
+              order: 7,
               padding: "20px 28px",
               display: "flex",
               alignItems: "center",
@@ -6212,10 +7048,33 @@ export const DirectionalWeightShiftExercise: React.FC<DirectionalWeightShiftExer
                 <span>Back to Dashboard</span>
               </button>
 
-              {/* Button B: Download Doctor PDF */}
+              {/* Button B: Landscape visual report (board PNG + paired charts) */}
+              <button
+                onClick={handleSaveVisualReport}
+                disabled={isSavingVisualReport || isExportingPdf || !sessionSummary}
+                className="btn-primary"
+                style={{
+                  padding: "12px 22px",
+                  fontSize: "0.9375rem",
+                  fontWeight: 800,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  borderRadius: "10px",
+                }}
+              >
+                <Download size={18} />
+                <span>
+                  {isSavingVisualReport
+                    ? "Saving landscape report…"
+                    : "Save Report"}
+                </span>
+              </button>
+
+              {/* Button B2: Download Doctor PDF */}
               <button
                 onClick={handleExportPdf}
-                disabled={isExportingPdf || !sessionSummary}
+                disabled={isExportingPdf || isSavingVisualReport || !sessionSummary}
                 className="btn-secondary"
                 style={{
                   padding: "12px 22px",

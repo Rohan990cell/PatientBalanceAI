@@ -877,6 +877,22 @@ export const DEFAULT_DIRECTIONAL_DURATIONS: Record<DirectionalTargetName, number
   "RETURN TO CENTER": 3,
 };
 
+/** Default hit-zone radius (mm) per direction — same as DEFAULT_PATIENT_TARGET_OFFSETS_MM.toleranceMm. */
+export const DEFAULT_DIRECTIONAL_TOLERANCES_MM: Record<DirectionalTargetName, number> = {
+  "SHIFT LEFT": 48,
+  "SHIFT RIGHT": 48,
+  "SHIFT FORWARD": 48,
+  "SHIFT BACKWARD": 48,
+  "SHIFT FORWARD-RIGHT": 48,
+  "SHIFT FORWARD-LEFT": 48,
+  "SHIFT BACKWARD-RIGHT": 48,
+  "SHIFT BACKWARD-LEFT": 48,
+  "RETURN TO CENTER": 48,
+};
+
+/** Clinician-adjustable hit-zone radius bounds (mm). */
+export const DIRECTIONAL_TOLERANCE_MM_BOUNDS = { min: 20, max: 100, step: 4 } as const;
+
 /**
  * Default target offset distances in physical millimetres.
  *
@@ -911,10 +927,12 @@ export interface PatientSpecificTargetConfig {
   forwardDistanceMm?: number;
   /** Anteroposterior backward target displacement in physical mm (default: 38.08 mm) */
   backwardDistanceMm?: number;
-  /** Radial tolerance zone radius in physical mm (default: 40.4 mm) */
+  /** Radial tolerance zone radius in physical mm (default: 48 mm) — applied when no per-target override */
   toleranceMm?: number;
   /** Custom required hold durations per direction in seconds */
   customDurations?: Partial<Record<DirectionalTargetName, number>>;
+  /** Custom hit-zone radius per direction in physical millimetres */
+  customTolerancesMm?: Partial<Record<DirectionalTargetName, number>>;
   /** Explicit classification indicating configurable assessment parameter vs validated clinical limit */
   parameterClassification?: string;
 }
@@ -1079,8 +1097,7 @@ export function getPatientCalibratedTargets(
   const rightDist = config?.rightDistanceMm ?? DEFAULT_PATIENT_TARGET_OFFSETS_MM.rightDistanceMm;
   const fwdDist = config?.forwardDistanceMm ?? DEFAULT_PATIENT_TARGET_OFFSETS_MM.forwardDistanceMm;
   const bwdDist = config?.backwardDistanceMm ?? DEFAULT_PATIENT_TARGET_OFFSETS_MM.backwardDistanceMm;
-  const tolMm = config?.toleranceMm ?? DEFAULT_PATIENT_TARGET_OFFSETS_MM.toleranceMm;
-  const tolNorm = parseFloat((tolMm / WII_BOARD_DIMENSIONS.halfDistanceXMm).toFixed(3));
+  const defaultTolMm = config?.toleranceMm ?? DEFAULT_PATIENT_TARGET_OFFSETS_MM.toleranceMm;
 
   const x0Mm = baseline && baseline.isCalibrated ? baseline.baselineX0Mm : 0.0;
   const y0Mm = baseline && baseline.isCalibrated ? baseline.baselineY0Mm : 0.0;
@@ -1088,7 +1105,8 @@ export function getPatientCalibratedTargets(
   const disclaimer = config?.parameterClassification ??
     "Configurable Assessment Parameter (Non-Validated Clinical Limit)";
 
-  // Far layout: 4 corners + Forward + Backward + Center (7 targets), near board edges.
+  // Far layout: 6 directional targets + Target 0 (center return). Near board edges.
+  // Session order is applied in getRandomizedFarDirectionalTargets: T1–T6 then return T0.
   const targetDefs: Array<{
     name: DirectionalTargetName;
     id: string;
@@ -1167,14 +1185,14 @@ export function getPatientCalibratedTargets(
     },
     {
       name: "RETURN TO CENTER",
-      id: "dir-target-7-center",
-      stepNumber: 7,
+      id: "dir-target-0-center",
+      stepNumber: 0,
       shortLabel: "Center",
       relXMm: 0.0,
       relYMm: 0.0,
       defaultHold: 3,
       instruction: (secWord) =>
-        `Return your body weight to the center target and hold for ${secWord}.`,
+        `Return to Target 0 (center) and hold for ${secWord}.`,
     },
   ];
 
@@ -1182,6 +1200,16 @@ export function getPatientCalibratedTargets(
     const holdSec = config?.customDurations && config.customDurations[def.name] !== undefined
       ? Math.max(0.5, config.customDurations[def.name]!)
       : (DEFAULT_DIRECTIONAL_DURATIONS[def.name] ?? def.defaultHold);
+
+    const rawTolMm =
+      config?.customTolerancesMm?.[def.name] !== undefined
+        ? config.customTolerancesMm[def.name]!
+        : (DEFAULT_DIRECTIONAL_TOLERANCES_MM[def.name] ?? defaultTolMm);
+    const tolMm = Math.max(
+      DIRECTIONAL_TOLERANCE_MM_BOUNDS.min,
+      Math.min(DIRECTIONAL_TOLERANCE_MM_BOUNDS.max, rawTolMm)
+    );
+    const tolNorm = parseFloat((tolMm / WII_BOARD_DIMENSIONS.halfDistanceXMm).toFixed(3));
 
     const secWord = holdSec === 1 ? "1 second" : `${holdSec} seconds`;
     const absTargetXMm = parseFloat((x0Mm + def.relXMm).toFixed(2));
@@ -1234,6 +1262,7 @@ export function getDirectionalTargets(
   const mergedConfig: PatientSpecificTargetConfig = {
     ...targetConfig,
     customDurations: customDurations ?? targetConfig?.customDurations,
+    customTolerancesMm: targetConfig?.customTolerancesMm,
   };
   return getPatientCalibratedTargets(baseline, mergedConfig);
 }
@@ -1251,15 +1280,17 @@ export function shuffleDirectionalTargets<T>(items: T[]): T[] {
 }
 
 /**
- * Far session sequence (7 targets):
- * opposite corner pairs + Forward/Backward, then Center.
- * Default: Fwd-Right → Back-Left → Forward → Backward → Fwd-Left → Back-Right → Center.
+ * Far session sequence:
+ * Target 0 = center (pre-start gate, then return after T6).
+ * Active order: T1–T6 (corners + forward/back), then return to Target 0 (center).
+ * No Target 7.
  */
 export function getRandomizedFarDirectionalTargets(
   customDurations?: Partial<Record<DirectionalTargetName, number>>,
-  baseline?: DirectionalCalibrationBaseline | null
+  baseline?: DirectionalCalibrationBaseline | null,
+  targetConfig?: PatientSpecificTargetConfig
 ): DirectionalTarget[] {
-  const all = getDirectionalTargets(customDurations, undefined, baseline);
+  const all = getDirectionalTargets(customDurations, targetConfig, baseline);
   const byName = (name: DirectionalTargetName) => all.find((t) => t.name === name)!;
   const center = byName("RETURN TO CENTER");
 
@@ -1274,28 +1305,48 @@ export function getRandomizedFarDirectionalTargets(
       ? [...orient(axisPair), ...orient(cornerPairB)]
       : [...orient(cornerPairB), ...orient(axisPair)];
 
-  const ordered = [...orient(cornerPairA), ...midPairs, center];
-  return ordered.map((t, i) => ({
+  // Steps 1–6 only (directional). Center is appended as Target 0 (not 7).
+  const directional = [...orient(cornerPairA), ...midPairs].map((t, i) => ({
     ...t,
     stepNumber: i + 1,
     id: `dir-target-${i + 1}-${t.shortLabel.toLowerCase().replace(/\s+/g, "-")}`,
   }));
+
+  const returnToTarget0: DirectionalTarget = {
+    ...center,
+    stepNumber: 0,
+    shortLabel: "Center",
+    id: "dir-target-0-center",
+    instruction:
+      center.instruction.includes("Target 0")
+        ? center.instruction
+        : center.instruction.replace(
+            /Return your body weight to the center target/i,
+            "Return to Target 0 (center)"
+          ),
+  };
+
+  return [...directional, returnToTarget0];
 }
 
 /** Synthetic center target used for the pre-start 3s center stance gate. */
 export function getCenterStartGateTarget(
-  baseline?: DirectionalCalibrationBaseline | null
+  baseline?: DirectionalCalibrationBaseline | null,
+  toleranceMm?: number
 ): DirectionalTarget {
   const x0Mm = baseline && baseline.isCalibrated ? baseline.baselineX0Mm : 0;
   const y0Mm = baseline && baseline.isCalibrated ? baseline.baselineY0Mm : 0;
-  const tolMm = 50.0;
+  const tolMm =
+    typeof toleranceMm === "number" && Number.isFinite(toleranceMm)
+      ? Math.max(1, toleranceMm)
+      : 50.0;
   const tolNorm = parseFloat((tolMm / WII_BOARD_DIMENSIONS.halfDistanceXMm).toFixed(3));
   return {
     id: "dir-center-start-gate",
     stepNumber: 0,
     name: "RETURN TO CENTER",
     shortLabel: "Center",
-    instruction: `Stand naturally in the center of the board and hold for ${CENTER_START_HOLD_SECONDS} seconds to begin Target 1.`,
+    instruction: `Target 0 (center): stand naturally and hold for ${CENTER_START_HOLD_SECONDS} seconds to begin Target 1.`,
     x: 0,
     y: 0,
     targetXMm: x0Mm,
@@ -1385,6 +1436,7 @@ export function calculateCopDistanceToTargetMm(
 
 /**
  * Evaluates whether the patient's COP has entered the target tolerance zone.
+ * Zone is a true circle in physical millimetres (√(dx²+dy²) ≤ toleranceMm).
  * Strictly returns false if telemetry is unavailable or disconnected.
  */
 export function isDirectionalTargetReached(
@@ -1392,9 +1444,38 @@ export function isDirectionalTargetReached(
   copY: number | null | undefined,
   target: DirectionalTarget
 ): boolean {
-  const dist = calculateCopDistanceToTarget(copX, copY, target.x, target.y);
-  if (dist === null) return false;
-  return dist <= target.tolerance;
+  const distMm = calculateCopDistanceToTargetMm(copX, copY, target.x, target.y);
+  if (distMm === null) return false;
+  const radiusMm =
+    typeof target.toleranceMm === "number" && Number.isFinite(target.toleranceMm)
+      ? target.toleranceMm
+      : target.tolerance * WII_BOARD_DIMENSIONS.halfDistanceXMm;
+  return distMm <= radiusMm;
+}
+
+/**
+ * CSS % size for a circular target zone on the board (aspect-corrected).
+ * Equal mm radius → equal pixel diameter on the 446×238 board.
+ */
+export function targetCircleSizePercent(toleranceMm: number): {
+  widthPct: number;
+  heightPct: number;
+} {
+  const mm = Math.max(1, toleranceMm);
+  // No large floor — smaller mm radius → proportionally smaller circle + balloon
+  return {
+    widthPct: Math.max(1.5, (mm / WII_BOARD_DIMENSIONS.halfDistanceXMm) * 100),
+    heightPct: Math.max(1.5, (mm / WII_BOARD_DIMENSIONS.halfDistanceYMm) * 100),
+  };
+}
+
+/** SVG viewBox radii (0–100 board %) for a circular mm zone under preserveAspectRatio="none". */
+export function targetCircleRadiiPercent(toleranceMm: number): { rx: number; ry: number } {
+  const mm = Math.max(1, toleranceMm);
+  return {
+    rx: Math.max(0.75, (mm / WII_BOARD_DIMENSIONS.halfDistanceXMm) * 50),
+    ry: Math.max(0.75, (mm / WII_BOARD_DIMENSIONS.halfDistanceYMm) * 50),
+  };
 }
 
 export interface DirectionalMovementGuidance {
@@ -1451,7 +1532,7 @@ export function computeDirectionalGuidance(
     };
   }
 
-  const isInTargetZone = distance <= target.tolerance;
+  const isInTargetZone = isDirectionalTargetReached(copX, copY, target);
   const dx = target.x - copX;
   const dy = target.y - copY;
 
@@ -2283,15 +2364,14 @@ export class DirectionalTargetTracker {
     const distNorm = calculateCopDistanceToTarget(copX, copY, this.assessment.targetX, this.assessment.targetY) ?? 0;
     const distMm = calculateCopDistanceToTargetMm(copX, copY, this.assessment.targetX, this.assessment.targetY) ?? 0;
 
-    // Strict target boundary logic with small tremor buffer:
-    // When entering from outside: strictly require distNorm <= tolerance.
-    // While holding inside: allow small natural tremor buffer (tolerance + SENSOR_JITTER_TOLERANCE_BUFFER)
-    // so natural sway right at the edge doesn't cause frustrating instantaneous resets.
-    // If COP leaves beyond this tolerance buffer, reset uninterrupted hold timer immediately.
-    const effectiveTolerance = this.wasInside
-      ? this.assessment.tolerance + SENSOR_JITTER_TOLERANCE_BUFFER
-      : this.assessment.tolerance;
-    const isInside = distNorm <= effectiveTolerance;
+    // True circle in mm: enter when distMm ≤ toleranceMm; while holding allow small tremor buffer
+    const radiusMm =
+      typeof this.assessment.toleranceMm === "number" && Number.isFinite(this.assessment.toleranceMm)
+        ? this.assessment.toleranceMm
+        : this.assessment.tolerance * WII_BOARD_DIMENSIONS.halfDistanceXMm;
+    const jitterMm = SENSOR_JITTER_TOLERANCE_BUFFER * WII_BOARD_DIMENSIONS.halfDistanceXMm;
+    const effectiveRadiusMm = this.wasInside ? radiusMm + jitterMm : radiusMm;
+    const isInside = distMm <= effectiveRadiusMm;
 
     const dtSec = dtMs / 1000;
     this.assessment.validDurationSeconds += dtSec;
