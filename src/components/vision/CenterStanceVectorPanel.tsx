@@ -3,8 +3,8 @@ import { createPortal } from "react-dom";
 import { Maximize2, X, ZoomIn, ZoomOut } from "lucide-react";
 import {
   CenterStanceSnapshot,
+  NamedNormPoint,
   Pose2DAngleVectorSpec,
-  formatAngleDeg,
 } from "../../utils/pose2dAngles";
 
 interface CenterStanceVectorPanelProps {
@@ -69,52 +69,76 @@ function toCropPixels(
   };
 }
 
-/** Polar angle at vertex (SVG y-down). */
-function rayAngle(vx: number, vy: number, px: number, py: number): number {
-  return Math.atan2(py - vy, px - vx);
+/** Stable undirected edge id from landmark names. */
+function edgeKey(aName: string, bName: string): string {
+  return aName < bName ? `${aName}|${bName}` : `${bName}|${aName}`;
 }
 
-/** Shortest signed delta from a0 → a1 in (−π, π]. */
-function shortestDelta(a0: number, a1: number): number {
-  let d = a1 - a0;
-  while (d > Math.PI) d -= Math.PI * 2;
-  while (d <= -Math.PI) d += Math.PI * 2;
-  return d;
+interface SkeletonEdge {
+  key: string;
+  a: NamedNormPoint;
+  b: NamedNormPoint;
 }
 
-/** SVG arc path for angle mark at vertex between two rays. */
+/** Unique MediaPipe bone segments from all angle vectors (A–B–C → AB+BC). */
+function buildSkeletonEdges(vectors: Pose2DAngleVectorSpec[]): SkeletonEdge[] {
+  const map = new Map<string, SkeletonEdge>();
+  for (const v of vectors) {
+    const pts = v.points;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i]!;
+      const b = pts[i + 1]!;
+      const key = edgeKey(a.name, b.name);
+      if (!map.has(key)) map.set(key, { key, a, b });
+    }
+  }
+  return [...map.values()];
+}
+
+/** Bone keys that belong to the selected joint (become dotted). */
+function selectedEdgeKeys(v: Pose2DAngleVectorSpec | null): Set<string> {
+  const keys = new Set<string>();
+  if (!v) return keys;
+  for (let i = 0; i < v.points.length - 1; i++) {
+    keys.add(edgeKey(v.points[i]!.name, v.points[i + 1]!.name));
+  }
+  return keys;
+}
+
+/**
+ * SVG path for the interior angle arc at B (A–B–C) — the “)” mark that shows
+ * which angle is being measured.
+ */
 function angleArcPath(
-  vx: number,
-  vy: number,
-  ax: number,
-  ay: number,
-  cx: number,
-  cy: number,
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  c: { x: number; y: number },
   radius: number
-): { d: string; midX: number; midY: number; sweep: number } {
-  const a0 = rayAngle(vx, vy, ax, ay);
-  const a1 = rayAngle(vx, vy, cx, cy);
-  const delta = shortestDelta(a0, a1);
-  const end = a0 + delta;
-  const x0 = vx + Math.cos(a0) * radius;
-  const y0 = vy + Math.sin(a0) * radius;
-  const x1 = vx + Math.cos(end) * radius;
-  const y1 = vy + Math.sin(end) * radius;
-  const large = Math.abs(delta) > Math.PI ? 1 : 0;
+): { d: string; labelX: number; labelY: number } | null {
+  const angA = Math.atan2(a.y - b.y, a.x - b.x);
+  const angC = Math.atan2(c.y - b.y, c.x - b.x);
+  let delta = angC - angA;
+  while (delta <= -Math.PI) delta += Math.PI * 2;
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  // Sweep the shorter interior arc (matches 0–180° joint angle)
+  const largeArc = Math.abs(delta) > Math.PI ? 1 : 0;
   const sweep = delta >= 0 ? 1 : 0;
-  const mid = a0 + delta / 2;
+  const x1 = b.x + Math.cos(angA) * radius;
+  const y1 = b.y + Math.sin(angA) * radius;
+  const x2 = b.x + Math.cos(angC) * radius;
+  const y2 = b.y + Math.sin(angC) * radius;
+  const mid = angA + delta / 2;
   return {
-    d: `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${radius} ${radius} 0 ${large} ${sweep} ${x1.toFixed(2)} ${y1.toFixed(2)}`,
-    midX: vx + Math.cos(mid) * (radius + 18),
-    midY: vy + Math.sin(mid) * (radius + 18),
-    sweep: Math.abs(delta),
+    d: `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${radius} ${radius} 0 ${largeArc} ${sweep} ${x2.toFixed(2)} ${y2.toFixed(2)}`,
+    labelX: b.x + Math.cos(mid) * (radius + 16),
+    labelY: b.y + Math.sin(mid) * (radius + 16),
   };
 }
 
 /**
  * Compact trigger + popup viewer:
  * - Person-cropped camera still (background sides removed via pose bbox)
- * - Large zoomable image + joint vector buttons
+ * - MediaPipe skeleton overlay; selected joint bones become dotted
  */
 export const CenterStanceVectorPanel: React.FC<CenterStanceVectorPanelProps> = ({
   snapshot,
@@ -319,8 +343,8 @@ export const CenterStanceVectorPanel: React.FC<CenterStanceVectorPanelProps> = (
               Center stance snapshot (3s hold)
             </div>
             <p style={{ margin: "4px 0 0", fontSize: "0.75rem", color: "#64748B", lineHeight: 1.45 }}>
-              Person-cropped still with joint vectors. Open the viewer to zoom and tap L/R shoulder,
-              elbow, hip, and other joints.
+              Yellow MediaPipe skeleton. Select a joint — those bones turn dotted in a highlight
+              color (same skeleton, not a second overlay).
             </p>
           </div>
         </div>
@@ -404,7 +428,7 @@ export const CenterStanceVectorPanel: React.FC<CenterStanceVectorPanelProps> = (
                     Center stance · person crop
                   </div>
                   <div style={{ fontSize: "0.8125rem", color: "#64748B", marginTop: 2 }}>
-                    Tap a joint for dotted rays + θ angle · scroll / + − to zoom · drag to pan
+                    Tap a joint — its yellow bones become dotted · scroll / + − to zoom · drag to pan
                   </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -511,161 +535,103 @@ export const CenterStanceVectorPanel: React.FC<CenterStanceVectorPanelProps> = (
                         pointerEvents: "none",
                       }}
                     >
-                      {snapshot.vectors.map((v) => {
-                        const active = selected?.key === v.key;
-                        const pts = v.points.map(toPx);
-                        if (pts.length < 2) return null;
-
-                        // Inactive joints: faint solid skeleton only
-                        if (!active) {
-                          if (pts.length === 2) {
-                            return (
-                              <g key={v.key} opacity={0.14}>
-                                <line
-                                  x1={pts[0].x}
-                                  y1={pts[0].y}
-                                  x2={pts[1].x}
-                                  y2={pts[1].y}
-                                  stroke={v.color}
-                                  strokeWidth={2}
-                                  strokeLinecap="round"
-                                />
-                              </g>
-                            );
-                          }
-                          const [a, b, c] = pts;
-                          return (
-                            <g key={v.key} opacity={0.12}>
-                              <line x1={b.x} y1={b.y} x2={a.x} y2={a.y} stroke={v.color} strokeWidth={2} strokeLinecap="round" />
-                              <line x1={b.x} y1={b.y} x2={c.x} y2={c.y} stroke={v.color} strokeWidth={2} strokeLinecap="round" />
-                            </g>
-                          );
-                        }
-
-                        // Active joint: dotted rays + θ angle mark
-                        const angleLabel =
-                          v.angleDeg === null || Number.isNaN(v.angleDeg)
-                            ? "θ"
-                            : `θ = ${v.angleDeg > 0 ? "+" : ""}${Math.round(v.angleDeg)}°`;
-
-                        if (pts.length === 2) {
-                          // Trunk: dotted body vector + dotted vertical reference + θ arc
-                          const [p0, p1] = pts;
-                          const len = Math.hypot(p1.x - p0.x, p1.y - p0.y) || 80;
-                          const vert = { x: p0.x, y: p0.y - len };
-                          const arc = angleArcPath(p0.x, p0.y, vert.x, vert.y, p1.x, p1.y, Math.min(42, len * 0.35));
-                          return (
-                            <g key={v.key}>
-                              <line
-                                x1={p0.x}
-                                y1={p0.y}
-                                x2={vert.x}
-                                y2={vert.y}
-                                stroke="#94A3B8"
-                                strokeWidth={2.5}
-                                strokeDasharray="6 5"
-                                strokeLinecap="round"
-                              />
-                              <line
-                                x1={p0.x}
-                                y1={p0.y}
-                                x2={p1.x}
-                                y2={p1.y}
-                                stroke={v.color}
-                                strokeWidth={3.5}
-                                strokeDasharray="7 6"
-                                strokeLinecap="round"
-                              />
-                              <path
-                                d={arc.d}
-                                fill="none"
-                                stroke={v.color}
-                                strokeWidth={2.5}
-                                strokeLinecap="round"
-                              />
-                              <circle cx={p0.x} cy={p0.y} r={6} fill="#FFFFFF" stroke={v.color} strokeWidth={2.5} />
-                              <circle cx={p1.x} cy={p1.y} r={5} fill={v.color} />
-                              <text
-                                x={arc.midX}
-                                y={arc.midY}
-                                textAnchor="middle"
-                                dominantBaseline="middle"
-                                fill={v.color}
-                                stroke="#FFFFFF"
-                                strokeWidth={3}
-                                paintOrder="stroke"
-                                style={{ fontSize: "22px", fontWeight: 800, fontFamily: "ui-sans-serif, system-ui, sans-serif" }}
-                              >
-                                {angleLabel}
-                              </text>
-                            </g>
-                          );
-                        }
-
-                        const [a, b, c] = pts;
-                        const arm = Math.min(
-                          48,
-                          Math.hypot(a.x - b.x, a.y - b.y) * 0.38,
-                          Math.hypot(c.x - b.x, c.y - b.y) * 0.38
-                        );
-                        const arcR = Math.max(22, arm);
-                        const arc = angleArcPath(b.x, b.y, a.x, a.y, c.x, c.y, arcR);
+                      {(() => {
+                        const edges = buildSkeletonEdges(snapshot.vectors);
+                        const activeKeys = selectedEdgeKeys(selected);
+                        // Same skeleton: yellow base → selected bones become dotted highlight
+                        const yellow = "#EAB308";
+                        const highlight = "#2563EB";
 
                         return (
-                          <g key={v.key}>
-                            {/* Dotted rays from joint */}
-                            <line
-                              x1={b.x}
-                              y1={b.y}
-                              x2={a.x}
-                              y2={a.y}
-                              stroke={v.color}
-                              strokeWidth={3.5}
-                              strokeDasharray="7 6"
-                              strokeLinecap="round"
-                            />
-                            <line
-                              x1={b.x}
-                              y1={b.y}
-                              x2={c.x}
-                              y2={c.y}
-                              stroke={v.color}
-                              strokeWidth={3.5}
-                              strokeDasharray="7 6"
-                              strokeLinecap="round"
-                            />
-                            {/* Angle arc + θ */}
-                            <path
-                              d={arc.d}
-                              fill="none"
-                              stroke={v.color}
-                              strokeWidth={2.75}
-                              strokeLinecap="round"
-                            />
-                            {/* Small open angle mark near vertex */}
-                            <circle cx={b.x} cy={b.y} r={7} fill="#FFFFFF" stroke={v.color} strokeWidth={2.5} />
-                            <circle cx={a.x} cy={a.y} r={5} fill={v.color} />
-                            <circle cx={c.x} cy={c.y} r={5} fill={v.color} />
-                            <text
-                              x={arc.midX}
-                              y={arc.midY}
-                              textAnchor="middle"
-                              dominantBaseline="middle"
-                              fill={v.color}
-                              stroke="#FFFFFF"
-                              strokeWidth={3.5}
-                              paintOrder="stroke"
-                              style={{
-                                fontSize: "24px",
-                                fontWeight: 800,
-                                fontFamily: "ui-sans-serif, system-ui, sans-serif",
-                              }}
-                            >
-                              {angleLabel}
-                            </text>
+                          <g>
+                            {/* 1) Full yellow skeleton (solid) */}
+                            {edges.map((e) => {
+                              const a = toPx(e.a);
+                              const b = toPx(e.b);
+                              if (activeKeys.has(e.key)) return null;
+                              return (
+                                <line
+                                  key={e.key}
+                                  x1={a.x}
+                                  y1={a.y}
+                                  x2={b.x}
+                                  y2={b.y}
+                                  stroke={yellow}
+                                  strokeWidth={3.25}
+                                  strokeLinecap="round"
+                                  opacity={0.95}
+                                />
+                              );
+                            })}
+                            {/* 2) Selected bones of THAT skeleton — dotted + blue (not a second overlay) */}
+                            {edges.map((e) => {
+                              if (!activeKeys.has(e.key)) return null;
+                              const a = toPx(e.a);
+                              const b = toPx(e.b);
+                              return (
+                                <line
+                                  key={`sel-${e.key}`}
+                                  x1={a.x}
+                                  y1={a.y}
+                                  x2={b.x}
+                                  y2={b.y}
+                                  stroke={highlight}
+                                  strokeWidth={4.25}
+                                  strokeDasharray="7 5"
+                                  strokeLinecap="round"
+                                  opacity={1}
+                                />
+                              );
+                            })}
+                            {/* Landmark dots — selected joints use highlight */}
+                            {edges.flatMap((e) => [e.a, e.b]).filter((p, i, arr) =>
+                              arr.findIndex((q) => q.name === p.name) === i
+                            ).map((p) => {
+                              const pt = toPx(p);
+                              const onSelected = selected?.points.some((sp) => sp.name === p.name);
+                              return (
+                                <circle
+                                  key={p.name}
+                                  cx={pt.x}
+                                  cy={pt.y}
+                                  r={onSelected ? 7 : 4}
+                                  fill={onSelected ? highlight : "#FFFFFF"}
+                                  stroke={onSelected ? highlight : yellow}
+                                  strokeWidth={onSelected ? 2.5 : 2}
+                                />
+                              );
+                            })}
+                            {/* Angle “)” arc at joint B for the selected A–B–C vectors */}
+                            {selected &&
+                              selected.points.length >= 3 &&
+                              (() => {
+                                const A = toPx(selected.points[0]!);
+                                const B = toPx(selected.points[1]!);
+                                const C = toPx(selected.points[2]!);
+                                const lenAB = Math.hypot(A.x - B.x, A.y - B.y);
+                                const lenCB = Math.hypot(C.x - B.x, C.y - B.y);
+                                const radius = Math.max(
+                                  22,
+                                  Math.min(48, Math.min(lenAB, lenCB) * 0.38)
+                                );
+                                const arc = angleArcPath(A, B, C, radius);
+                                if (!arc) return null;
+                                return (
+                                  <g key={`angle-arc-${selected.key}`}>
+                                    <path
+                                      d={arc.d}
+                                      fill="none"
+                                      stroke={highlight}
+                                      strokeWidth={3.5}
+                                      strokeLinecap="round"
+                                      opacity={0.95}
+                                    />
+                                  </g>
+                                );
+                              })()}
                           </g>
                         );
-                      })}
+                      })()}
                       {snapshot.midHip && (
                         (() => {
                           const h = toPx(snapshot.midHip);
@@ -700,7 +666,7 @@ export const CenterStanceVectorPanel: React.FC<CenterStanceVectorPanelProps> = (
                   }}
                 >
                   <span style={{ fontWeight: 800, color: selected.color }}>
-                    {selected.label} · {formatAngleDeg(selected.angleDeg)}
+                    {selected.label}
                   </span>
                   <span style={{ color: "#64748B", marginLeft: 10 }}>{selected.vectorDescription}</span>
                 </div>
@@ -734,7 +700,7 @@ export const CenterStanceVectorPanel: React.FC<CenterStanceVectorPanelProps> = (
                         boxShadow: active ? `0 0 0 3px ${v.color}22` : undefined,
                       }}
                     >
-                      {v.label} {formatAngleDeg(v.angleDeg)}
+                      {v.label}
                     </button>
                   );
                 })}

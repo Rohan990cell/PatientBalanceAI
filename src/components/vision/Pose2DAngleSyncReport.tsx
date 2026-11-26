@@ -14,6 +14,8 @@ interface Pose2DAngleSyncReportProps {
   report?: Pose2DAngleSessionReport | null;
   centerStance?: CenterStanceSnapshot | null;
   transitBoxPlots?: TransitAngleBoxPlot[] | null;
+  /** When false, transit box plots are omitted (parent can render them elsewhere). */
+  showTransitBoxPlots?: boolean;
   isSaving?: boolean;
   savedJsonPath?: string | null;
   saveError?: string | null;
@@ -46,6 +48,7 @@ export const Pose2DAngleSyncReport: React.FC<Pose2DAngleSyncReportProps> = ({
   report = null,
   centerStance = null,
   transitBoxPlots = null,
+  showTransitBoxPlots = true,
   isSaving = false,
   savedJsonPath = null,
   saveError = null,
@@ -58,7 +61,7 @@ export const Pose2DAngleSyncReport: React.FC<Pose2DAngleSyncReportProps> = ({
 
   const hasSnapshots = Boolean(report && report.snapshots.length > 0);
   const hasTransitPlots = Boolean(transitBoxPlots && transitBoxPlots.length > 0);
-  if (!hasSnapshots && !centerStance && !hasTransitPlots) {
+  if (!hasSnapshots && !centerStance && !(showTransitBoxPlots && hasTransitPlots)) {
     return (
       <div
         className="medical-card"
@@ -316,7 +319,7 @@ export const Pose2DAngleSyncReport: React.FC<Pose2DAngleSyncReportProps> = ({
       )}
 
       {/* Leave→hit transit box plots (upper joints then lower) */}
-      {(hasTransitPlots || hasSnapshots) && (
+      {showTransitBoxPlots && (hasTransitPlots || hasSnapshots) && (
         <TransitAngleBoxPlotPanel plots={transitBoxPlots ?? []} />
       )}
     </div>

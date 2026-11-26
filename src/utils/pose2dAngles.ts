@@ -528,10 +528,11 @@ export interface Pose2DAngleTimelineSample {
 }
 
 /**
- * Box-plot X order: upper body → lower body → trunk sway.
- * (L/R pairs kept together within each region.)
+ * Box-plot X order: trunk first, then L/R joint pairs (shoulders → … → ankles).
+ * Rendering packs each L/R pair tightly with larger gaps between pairs.
  */
 export const TRANSIT_BOX_PLOT_METRIC_ORDER: Pose2DAngleMetricKey[] = [
+  "trunkSwayDeg",
   "leftShoulderDeg",
   "rightShoulderDeg",
   "leftElbowDeg",
@@ -544,8 +545,53 @@ export const TRANSIT_BOX_PLOT_METRIC_ORDER: Pose2DAngleMetricKey[] = [
   "rightKneeDeg",
   "leftAnkleDeg",
   "rightAnkleDeg",
-  "trunkSwayDeg",
 ];
+
+/**
+ * X centers for box plots: trunk (solo) then L/R pairs close together,
+ * with larger gaps between joint groups.
+ */
+export function computePairedBoxCenters(
+  boxCount: number,
+  left: number,
+  innerW: number
+): number[] {
+  if (boxCount <= 0) return [];
+
+  const groups: number[][] = [[0]];
+  for (let i = 1; i < boxCount; i += 2) {
+    const g = [i];
+    if (i + 1 < boxCount) g.push(i + 1);
+    groups.push(g);
+  }
+
+  /** Width units per group (pair or trunk). */
+  const PAIR_SPAN = 1;
+  /** Extra gap between groups (e.g. Shoulder → Elbow) — keep tight. */
+  const GROUP_GAP = 0.4;
+  /** Fraction of PAIR_SPAN separating L vs R centers (small = tight pair). */
+  const WITHIN_PAIR = 0.28;
+
+  const totalUnits =
+    groups.length * PAIR_SPAN + Math.max(0, groups.length - 1) * GROUP_GAP;
+  const unit = innerW / Math.max(1e-6, totalUnits);
+
+  const centers: number[] = new Array(boxCount);
+  let cursor = left;
+  for (const g of groups) {
+    const span = PAIR_SPAN * unit;
+    if (g.length === 1) {
+      centers[g[0]!] = cursor + span / 2;
+    } else {
+      const mid = cursor + span / 2;
+      const half = (WITHIN_PAIR * span) / 2;
+      centers[g[0]!] = mid - half;
+      centers[g[1]!] = mid + half;
+    }
+    cursor += span + GROUP_GAP * unit;
+  }
+  return centers;
+}
 
 export interface TransitAngleBoxStats {
   key: Pose2DAngleMetricKey;
@@ -580,6 +626,11 @@ export interface TransitAngleBoxPlot {
   expectedPoints: number;
   sampleCount: number;
   boxes: TransitAngleBoxStats[];
+  /**
+   * When true, box values are Δ° vs center-stance T0 baseline
+   * (T_n − T0 for every sample — never T_n − T_{n−1}).
+   */
+  relativeToT0: boolean;
 }
 
 function quantileOfSorted(sorted: number[], q: number): number {
@@ -696,16 +747,38 @@ export function computeLeaveToHitWindow(
   };
 }
 
+/** Δ° = sample − T0 baseline (null if either side missing). */
+function angleDeltaFromBaseline(
+  sample: number | null | undefined,
+  baseline: number | null | undefined
+): number | null {
+  if (
+    typeof sample !== "number" ||
+    typeof baseline !== "number" ||
+    !Number.isFinite(sample) ||
+    !Number.isFinite(baseline)
+  ) {
+    return null;
+  }
+  return parseFloat((sample - baseline).toFixed(1));
+}
+
 /**
  * Build per-transit box plots from continuous angle timeline.
  * Window = leave prev border (after complete) → hit next border.
- * Point count ≈ duration_s × vision FPS (filtered samples in that window).
+ *
+ * When `t0Baseline` (center-stance angles) is provided, every sample is
+ * converted to Δ° vs T0:  T1−T0, T2−T0, …  (always vs center, not vs previous target).
  */
 export function buildTransitAngleBoxPlots(
   targets: TransitTargetSlice[],
-  timeline: Pose2DAngleTimelineSample[]
+  timeline: Pose2DAngleTimelineSample[],
+  t0Baseline?: Pose2DAngles | null
 ): TransitAngleBoxPlot[] {
   if (!targets.length || !timeline.length) return [];
+
+  const baseline = t0Baseline ? normalizeAnglesForReport(t0Baseline) : null;
+  const relativeToT0 = Boolean(baseline);
 
   const out: TransitAngleBoxPlot[] = [];
   for (let i = 0; i < targets.length; i++) {
@@ -734,7 +807,14 @@ export function buildTransitAngleBoxPlots(
     const boxes: TransitAngleBoxStats[] = [];
     for (const key of TRANSIT_BOX_PLOT_METRIC_ORDER) {
       const vals = inWindow
-        .map((s) => s.angles[key] as number | null | undefined)
+        .map((s) => {
+          const raw = s.angles[key] as number | null | undefined;
+          if (!baseline) {
+            return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+          }
+          const baseVal = baseline[key] as number | null | undefined;
+          return angleDeltaFromBaseline(raw, baseVal);
+        })
         .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
       const box = boxStatsFromValues(key, vals);
       if (box) boxes.push(box);
@@ -742,7 +822,8 @@ export function buildTransitAngleBoxPlots(
     if (boxes.length === 0) continue;
 
     out.push({
-      fromStep: Math.max(0, curr.stepNumber - 1),
+      // Prefer previous target's real step (so after T6 → T0 shows 6 → 0, not −1 → 0)
+      fromStep: prev ? prev.stepNumber : Math.max(0, curr.stepNumber - 1),
       toStep: curr.stepNumber,
       toLabel: curr.shortLabel,
       leaveTs: win.leaveTs,
@@ -752,6 +833,7 @@ export function buildTransitAngleBoxPlots(
       expectedPoints,
       sampleCount: inWindow.length,
       boxes,
+      relativeToT0,
     });
   }
   return out;
