@@ -17,7 +17,7 @@ export const HoldWindowMovementGraph: React.FC<HoldWindowMovementGraphProps> = (
 
     const W = 640;
     const H = 220;
-    const pad = { top: 18, right: 16, bottom: 36, left: 48 };
+    const pad = { top: 18, right: 16, bottom: 36, left: 64 };
     const innerW = W - pad.left - pad.right;
     const innerH = H - pad.top - pad.bottom;
 
@@ -191,8 +191,9 @@ export const HoldWindowMovementGraph: React.FC<HoldWindowMovementGraphProps> = (
             x={chart.pad.left - 6}
             y={chart.yOf(v) + 3}
             textAnchor="end"
-            fill="#64748B"
+            fill="#000000"
             fontSize={9}
+            fontWeight={700}
             fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
           >
             {v.toFixed(0)}
@@ -204,8 +205,9 @@ export const HoldWindowMovementGraph: React.FC<HoldWindowMovementGraphProps> = (
             x={chart.xOf(sec)}
             y={chart.pad.top + chart.innerH + 14}
             textAnchor="middle"
-            fill="#64748B"
+            fill="#000000"
             fontSize={9}
+            fontWeight={700}
             fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
           >
             {sec}
@@ -217,25 +219,27 @@ export const HoldWindowMovementGraph: React.FC<HoldWindowMovementGraphProps> = (
           y1={chart.pad.top + chart.innerH}
           x2={chart.pad.left + chart.innerW}
           y2={chart.pad.top + chart.innerH}
-          stroke="#94A3B8"
-          strokeWidth={1.2}
+          stroke="#000000"
+          strokeWidth={1.5}
         />
         <line
           x1={chart.pad.left}
           y1={chart.pad.top}
           x2={chart.pad.left}
           y2={chart.pad.top + chart.innerH}
-          stroke="#94A3B8"
-          strokeWidth={1.2}
+          stroke="#000000"
+          strokeWidth={1.5}
         />
 
         <text
           x={12}
           y={chart.pad.top + chart.innerH / 2}
-          fill="#64748B"
+          fill="#000000"
           fontSize={9}
-          fontWeight={700}
+          fontWeight={800}
           transform={`rotate(-90 12 ${chart.pad.top + chart.innerH / 2})`}
+          textAnchor="middle"
+          dominantBaseline="middle"
         >
           Miss (mm)
         </text>
@@ -243,9 +247,9 @@ export const HoldWindowMovementGraph: React.FC<HoldWindowMovementGraphProps> = (
           x={chart.pad.left + chart.innerW / 2}
           y={chart.H - 8}
           textAnchor="middle"
-          fill="#64748B"
+          fill="#000000"
           fontSize={9}
-          fontWeight={700}
+          fontWeight={800}
         >
           Time (seconds)
         </text>

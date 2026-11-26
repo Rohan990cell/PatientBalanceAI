@@ -1,11 +1,15 @@
 import { BalanceSession } from "../types/session";
 import { PatientProfile } from "../types/patient";
-import { DirectionalWeightShiftSessionSummary } from "../utils/directionalWeightShiftExercise";
+import {
+  DirectionalWeightShiftSessionSummary,
+  HoldWindowErrorSeries,
+} from "../utils/directionalWeightShiftExercise";
 import { LegRaiseSessionSummary } from "../utils/multimodalLegRaiseExercise";
 import { GameSessionSummary } from "../utils/targetAchievingGame";
-import { Pose2DAngleSessionReport } from "../utils/pose2dAngles";
+import { Pose2DAngleSessionReport, TransitAngleBoxPlot } from "../utils/pose2dAngles";
 import { PdfReportGenerator } from "./pdfReportGenerator";
 import { Pose2DAngleReportService } from "./pose2dAngleReportService";
+import { generateLandscapeVisualReport } from "./directionalVisualReport";
 
 export interface GeneratePdfResult {
   filename: string;
@@ -131,6 +135,55 @@ export class PdfReportService {
   }
 
   /**
+   * Landscape visual report: board PNG page + paired line chart | box plot pages.
+   */
+  public static async generateAndSaveLandscapeVisualReport(params: {
+    boardElement: HTMLElement;
+    summary: DirectionalWeightShiftSessionSummary;
+    holdSeries: HoldWindowErrorSeries[];
+    transitBoxPlots: TransitAngleBoxPlot[];
+  }): Promise<GeneratePdfResult> {
+    const { boardElement, summary, holdSeries, transitBoxPlots } = params;
+    if (!summary?.sessionId) {
+      throw new Error("Invalid session for landscape visual report.");
+    }
+
+    const filename = `PatientBalanceAI_VisualReport_${summary.sessionId}.pdf`;
+    const doc = await generateLandscapeVisualReport({
+      boardElement,
+      patientName: summary.patientName,
+      sessionId: summary.sessionId,
+      sessionDate: summary.sessionDate,
+      holdSeries,
+      transitBoxPlots,
+    });
+
+    let filePath = filename;
+    if (this.isTauri()) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const arrayBuffer = doc.output("arraybuffer");
+        const uint8Array = new Uint8Array(arrayBuffer);
+        const savedPath = await invoke<string>("save_pdf_report", {
+          filename,
+          pdfBytes: Array.from(uint8Array),
+        });
+        filePath = savedPath;
+      } catch (err) {
+        console.warn("Tauri save landscape visual report failed, using browser download:", err);
+      }
+    }
+
+    try {
+      doc.save(filename);
+    } catch (saveErr) {
+      console.warn("doc.save landscape visual warning:", saveErr);
+    }
+
+    return { filename, filePath, success: true };
+  }
+
+  /**
    * Generates, saves to disk via Tauri (or browser download fallback),
    * and returns the resulting Multimodal Leg Raise & Balance report details.
    */
@@ -226,4 +279,3 @@ export class PdfReportService {
     };
   }
 }
-
